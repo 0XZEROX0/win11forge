@@ -1,0 +1,14 @@
+{
+  "_comment": "Microsoft-published generic setup keys. They only let Windows Setup choose the edition without asking. They never activate Windows: activation comes from the laptop's own digital/OEM license or your own key.",
+  "genericKeys": {
+    "Core": "YTMG3-N6DKC-DKB77-7M9GH-8HVX7",
+    "CoreN": "4CPRK-NM3K3-X6XXQ-RXX86-WXCHW",
+    "CoreSingleLanguage": "BT79Q-G7N6G-PGBYW-4YWX6-6F4BT",
+    "Professional": "VK7JG-NPHTM-C97JM-9MPGT-3V66T",
+    "ProfessionalN": "MH37W-N47XK-V7XM9-C7227-GCQG9",
+    "ProfessionalWorkstation": "DXG7C-N36C4-C4HTG-X4T3X-2YV77",
+    "ProfessionalEducation": "8PTT6-RNW4C-6V7J2-C2D3X-MHBPB",
+    "Education": "YNMGQ-8RYV3-4PGQ3-C8XTP-7CFBY",
+    "Enterprise": "XGVPP-NMH47-7TTHJ-W3FW7-8HV2C"
+  }
+}

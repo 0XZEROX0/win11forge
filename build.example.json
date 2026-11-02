@@ -1,0 +1,25 @@
+{
+  "IsoPath": "C:\\ISO\\Win11_25H2_English_x64.iso",
+  "ImageIndex": 6,
+  "Mode": "ISO",
+  "WorkDir": "C:\\Win11Forge-work",
+  "RemoveAds": true,
+  "CleanupImage": true,
+  "UseEsd": false,
+  "DriverDirs": ["C:\\Drivers\\IntelRST", "C:\\Drivers\\Wifi"],
+  "IncludeHostDrivers": false,
+  "UpdatesDir": "",
+  "UserName": "User",
+  "Password": "",
+  "ComputerName": "",
+  "Locale": "en-US",
+  "Keyboard": "0409:00000409",
+  "TimeZone": "Egypt Standard Time",
+  "AutoLogon": true,
+  "BypassHardware": true,
+  "OutputIso": "C:\\ISO\\Win11-Forge.iso",
+  "WipeDisk0": false,
+
+  "_wtg_example": "For Windows To Go set Mode to WTG and add DiskNumber (Windows) or Disk such as /dev/sdb (Linux), plus CompactOS and PortableMode.",
+  "_apps": "RemoveApps is optional; without it the apps ticked by default in config/apps.json are removed. To choose, list the patterns, e.g. [\"Clipchamp.Clipchamp\", \"Microsoft.BingNews\"]."
+}

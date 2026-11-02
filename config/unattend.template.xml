@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Win11Forge answer file template, shared by the Windows and Linux engines.
+  Tokens in double braces are filled in by the engine (locale, keyboard, time zone, user, password,
+  computer name, generic product key). IF/ENDIF comment blocks: ISO, WIPE, KEY, BYPASS, AUTOLOGON.
+  The generated file holds the local account password in plain text.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<!--#IF ISO-->
+    <settings pass="windowsPE">
+        <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <SetupUILanguage><UILanguage>{{LOCALE}}</UILanguage></SetupUILanguage>
+            <InputLocale>{{KEYBOARD}}</InputLocale>
+            <SystemLocale>{{LOCALE}}</SystemLocale>
+            <UILanguage>{{LOCALE}}</UILanguage>
+            <UserLocale>{{LOCALE}}</UserLocale>
+        </component>
+        <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+<!--#IF BYPASS-->
+            <RunSynchronous>
+                <RunSynchronousCommand wcm:action="add"><Order>1</Order><Path>reg.exe add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add"><Order>2</Order><Path>reg.exe add HKLM\SYSTEM\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add"><Order>3</Order><Path>reg.exe add HKLM\SYSTEM\Setup\LabConfig /v BypassRAMCheck /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add"><Order>4</Order><Path>reg.exe add HKLM\SYSTEM\Setup\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add"><Order>5</Order><Path>reg.exe add HKLM\SYSTEM\Setup\LabConfig /v BypassStorageCheck /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>
+            </RunSynchronous>
+<!--#ENDIF BYPASS-->
+<!--#IF WIPE-->
+            <DiskConfiguration>
+                <Disk wcm:action="add">
+                    <DiskID>0</DiskID>
+                    <WillWipeDisk>true</WillWipeDisk>
+                    <CreatePartitions>
+                        <CreatePartition wcm:action="add"><Order>1</Order><Type>EFI</Type><Size>300</Size></CreatePartition>
+                        <CreatePartition wcm:action="add"><Order>2</Order><Type>MSR</Type><Size>16</Size></CreatePartition>
+                        <CreatePartition wcm:action="add"><Order>3</Order><Type>Primary</Type><Extend>true</Extend></CreatePartition>
+                    </CreatePartitions>
+                    <ModifyPartitions>
+                        <ModifyPartition wcm:action="add"><Order>1</Order><PartitionID>1</PartitionID><Format>FAT32</Format><Label>System</Label></ModifyPartition>
+                        <ModifyPartition wcm:action="add"><Order>2</Order><PartitionID>2</PartitionID></ModifyPartition>
+                        <ModifyPartition wcm:action="add"><Order>3</Order><PartitionID>3</PartitionID><Format>NTFS</Format><Label>Windows</Label><Letter>C</Letter></ModifyPartition>
+                    </ModifyPartitions>
+                </Disk>
+                <WillShowUI>OnError</WillShowUI>
+            </DiskConfiguration>
+<!--#ENDIF WIPE-->
+            <ImageInstall>
+                <OSImage>
+                    <InstallFrom>
+                        <MetaData wcm:action="add"><Key>/IMAGE/INDEX</Key><Value>1</Value></MetaData>
+                    </InstallFrom>
+<!--#IF WIPE-->
+                    <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
+<!--#ENDIF WIPE-->
+                    <WillShowUI>OnError</WillShowUI>
+                </OSImage>
+            </ImageInstall>
+            <UserData>
+<!--#IF KEY-->
+                <ProductKey><Key>{{PRODUCTKEY}}</Key><WillShowUI>OnError</WillShowUI></ProductKey>
+<!--#ENDIF KEY-->
+                <AcceptEula>true</AcceptEula>
+            </UserData>
+            <DynamicUpdate><Enable>false</Enable><WillShowUI>Never</WillShowUI></DynamicUpdate>
+        </component>
+    </settings>
+<!--#ENDIF ISO-->
+    <settings pass="specialize">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <ComputerName>{{COMPUTERNAME}}</ComputerName>
+            <TimeZone>{{TIMEZONE}}</TimeZone>
+        </component>
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <RunSynchronous>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Path>reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE" /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+                </RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>2</Order>
+                    <Description>Install drivers staged by the Linux engine (no-op otherwise)</Description>
+                    <Path>cmd.exe /c if exist C:\Windows\Setup\Drivers pnputil.exe /add-driver C:\Windows\Setup\Drivers\*.inf /subdirs /install</Path>
+                </RunSynchronousCommand>
+            </RunSynchronous>
+        </component>
+    </settings>
+    <settings pass="oobeSystem">
+        <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <InputLocale>{{KEYBOARD}}</InputLocale>
+            <SystemLocale>{{LOCALE}}</SystemLocale>
+            <UILanguage>{{LOCALE}}</UILanguage>
+            <UserLocale>{{LOCALE}}</UserLocale>
+        </component>
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+                <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                <ProtectYourPC>3</ProtectYourPC>
+            </OOBE>
+            <UserAccounts>
+                <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                        <Name>{{USER}}</Name>
+                        <DisplayName>{{USER}}</DisplayName>
+                        <Group>Administrators</Group>
+                        <Password><Value>{{PASSWORD}}</Value><PlainText>true</PlainText></Password>
+                    </LocalAccount>
+                </LocalAccounts>
+            </UserAccounts>
+<!--#IF AUTOLOGON-->
+            <AutoLogon>
+                <Enabled>true</Enabled>
+                <Username>{{USER}}</Username>
+                <Password><Value>{{PASSWORD}}</Value><PlainText>true</PlainText></Password>
+                <LogonCount>9999999</LogonCount>
+            </AutoLogon>
+<!--#ENDIF AUTOLOGON-->
+            <FirstLogonCommands>
+                <SynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\Windows\Setup\Scripts\firstlogon.ps1</CommandLine>
+                    <Description>Win11Forge first logon cleanup</Description>
+                </SynchronousCommand>
+            </FirstLogonCommands>
+        </component>
+    </settings>
+</unattend>

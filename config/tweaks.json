@@ -1,0 +1,405 @@
+{
+ "_comment": "Offline registry changes shared by the Windows and Linux engines. hive: SOFT=HKLM\\SOFTWARE, SYS=HKLM\\SYSTEM, USER=default user profile (every new account). All values are REG_DWORD. when: always | ads (Remove ads option) | bypass (unsupported hardware option) | wtg (Windows To Go output) | portable (WTG portable flag). SanPolicy 4 keeps the host laptop's internal disks offline while running from USB.",
+ "set": [
+  {
+   "hive": "SOFT",
+   "key": "Microsoft\\Windows\\CurrentVersion\\OOBE",
+   "name": "BypassNRO",
+   "value": 1,
+   "when": "always"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\OOBE",
+   "name": "DisablePrivacyExperience",
+   "value": 1,
+   "when": "always"
+  },
+  {
+   "hive": "SYS",
+   "key": "ControlSet001\\Control\\BitLocker",
+   "name": "PreventDeviceEncryption",
+   "value": 1,
+   "when": "always"
+  },
+  {
+   "hive": "SYS",
+   "key": "ControlSet001\\Control\\Session Manager\\Power",
+   "name": "HiberbootEnabled",
+   "value": 0,
+   "when": "always"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\CloudContent",
+   "name": "DisableWindowsConsumerFeatures",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\CloudContent",
+   "name": "DisableConsumerAccountStateContent",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\CloudContent",
+   "name": "DisableCloudOptimizedContent",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\CloudContent",
+   "name": "DisableSoftLanding",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\AdvertisingInfo",
+   "name": "DisabledByGroupPolicy",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\DataCollection",
+   "name": "AllowTelemetry",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\DataCollection",
+   "name": "DoNotShowFeedbackNotifications",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Dsh",
+   "name": "AllowNewsAndInterests",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\WindowsCopilot",
+   "name": "TurnOffWindowsCopilot",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\WindowsAI",
+   "name": "DisableAIDataAnalysis",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\Windows Search",
+   "name": "AllowCortana",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\Windows Search",
+   "name": "DisableWebSearch",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Windows\\Windows Search",
+   "name": "ConnectedSearchUseWeb",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Microsoft\\Windows\\CurrentVersion\\Communications",
+   "name": "ConfigureChatAutoInstall",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Policies\\Microsoft\\Edge",
+   "name": "HideFirstRunExperience",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Microsoft\\Windows\\CurrentVersion\\ReserveManager",
+   "name": "ShippedWithReserves",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "ContentDeliveryAllowed",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "FeatureManagementEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "OemPreInstalledAppsEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "PreInstalledAppsEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "PreInstalledAppsEverEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SilentInstalledAppsEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SoftLandingEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SystemPaneSuggestionsEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SubscribedContentEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "RotatingLockScreenOverlayEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SubscribedContent-310093Enabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SubscribedContent-338387Enabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SubscribedContent-338388Enabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SubscribedContent-338389Enabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SubscribedContent-338393Enabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SubscribedContent-353694Enabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SubscribedContent-353696Enabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager",
+   "name": "SubscribedContent-353698Enabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+   "name": "Start_IrisRecommendations",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+   "name": "Start_AccountNotifications",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+   "name": "ShowSyncProviderNotifications",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+   "name": "TaskbarDa",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+   "name": "TaskbarMn",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+   "name": "ShowCopilotButton",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\Search",
+   "name": "BingSearchEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Policies\\Microsoft\\Windows\\Explorer",
+   "name": "DisableSearchBoxSuggestions",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Policies\\Microsoft\\Windows\\WindowsCopilot",
+   "name": "TurnOffWindowsCopilot",
+   "value": 1,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\UserProfileEngagement",
+   "name": "ScoobeSystemSettingEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\AdvertisingInfo",
+   "name": "Enabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Windows\\CurrentVersion\\Privacy",
+   "name": "TailoredExperiencesWithDiagnosticDataEnabled",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "USER",
+   "key": "Software\\Microsoft\\Siuf\\Rules",
+   "name": "NumberOfSIUFInPeriod",
+   "value": 0,
+   "when": "ads"
+  },
+  {
+   "hive": "SYS",
+   "key": "Setup\\MoSetup",
+   "name": "AllowUpgradesWithUnsupportedTPMOrCPU",
+   "value": 1,
+   "when": "bypass"
+  },
+  {
+   "hive": "SYS",
+   "key": "ControlSet001\\Services\\partmgr\\Parameters",
+   "name": "SanPolicy",
+   "value": 4,
+   "when": "wtg"
+  },
+  {
+   "hive": "SYS",
+   "key": "ControlSet001\\Control",
+   "name": "PortableOperatingSystem",
+   "value": 1,
+   "when": "portable"
+  }
+ ],
+ "delete": [
+  {
+   "hive": "SOFT",
+   "key": "Microsoft\\WindowsUpdate\\Orchestrator\\UScheduler_Oobe\\OutlookUpdate",
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Microsoft\\WindowsUpdate\\Orchestrator\\UScheduler_Oobe\\DevHomeUpdate",
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Microsoft\\WindowsUpdate\\Orchestrator\\UScheduler\\OutlookUpdate",
+   "when": "ads"
+  },
+  {
+   "hive": "SOFT",
+   "key": "Microsoft\\WindowsUpdate\\Orchestrator\\UScheduler\\DevHomeUpdate",
+   "when": "ads"
+  }
+ ]
+}
