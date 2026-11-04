@@ -77,8 +77,9 @@ def load_json(name):
 
 
 class Engine:
-    def __init__(self, log=print):
+    def __init__(self, log=print, progress=None):
         self.log = log
+        self.progress = progress  # optional callback(percent) for long wimlib steps
 
     # ------------------------------------------------------------------ process helpers
     def run(self, args, ok=(0,), capture=False, quiet=False):
@@ -92,7 +93,10 @@ class Engine:
             out.append(line)
             if not capture and line.strip() and not quiet:
                 # wimlib progress lines repeat a lot; keep the log readable
-                if re.search(r"\d+%\)?\s*done\s*$", line) and "(100%)" not in line:
+                pm = re.search(r"(\d+)%\)?\s*done\s*$", line)
+                if pm and self.progress:
+                    self.progress(int(pm.group(1)))
+                if pm and "(100%)" not in line:
                     continue
                 self.log("  " + line.strip())
         code = p.wait()
