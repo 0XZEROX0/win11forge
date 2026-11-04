@@ -5,8 +5,11 @@
         powershell -ExecutionPolicy Bypass -STA -File .\Win11Forge.ps1
     Headless:
         powershell -ExecutionPolicy Bypass -File .\Win11Forge.ps1 -Config .\build.json
+    USB installer from a finished ISO (as Administrator):
+        powershell -ExecutionPolicy Bypass -File .\Win11Forge.ps1 -ListUsb
+        powershell -ExecutionPolicy Bypass -File .\Win11Forge.ps1 -WriteUsb .\Win11-Forge.iso -Disk 2
 #>
-param([string]$Config)
+param([string]$Config, [string]$WriteUsb, [int]$Disk = -1, [switch]$ListUsb)
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
@@ -18,6 +21,19 @@ if ($Config) {
     $o = @{}
     (Get-Content -Raw $Config | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $o[$_.Name] = $_.Value }
     Invoke-ForgeBuild -Options $o
+    return
+}
+if ($ListUsb) {
+    $d = @(Get-ForgeUsbDisks)
+    if ($d.Count) { $d | ForEach-Object { $_.Label } } else { 'No USB drives found.' }
+    return
+}
+if ($WriteUsb) {
+    $d = @(Get-ForgeUsbDisks | Where-Object Number -eq $Disk)
+    if (-not $d.Count) { throw "Pass -Disk with one of these USB drives: " + ((@(Get-ForgeUsbDisks) | ForEach-Object { $_.Number }) -join ', ') }
+    $ans = Read-Host "Everything on $($d[0].Label) will be erased. Type YES to continue"
+    if ($ans -cne 'YES') { 'Cancelled.'; return }
+    Write-ForgeIsoToUsb -IsoPath $WriteUsb -DiskNumber $Disk
     return
 }
 
@@ -143,6 +159,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
     <DockPanel Grid.Column="2">
       <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
         <Button Name="BtnUnattend" Content="Save answer file only"/>
+        <Button Name="BtnUsb" Content="Write ISO to USB..."/>
         <Button Name="BtnBuild" Content="Build" Padding="28,6" FontWeight="SemiBold" Background="#2563EB" Foreground="White" BorderBrush="#2563EB"/>
       </StackPanel>
       <ProgressBar Name="Prog" DockPanel.Dock="Bottom" Height="6" Margin="0,8,0,0"/>
@@ -292,8 +309,80 @@ $ui.BtnUnattend.Add_Click({
     }
 })
 
-# The build runs in a background runspace so the window stays responsive.
-$script:Sync = [hashtable]::Synchronized(@{ Queue = New-Object System.Collections.Concurrent.ConcurrentQueue[string]; Done = $false; Ok = $false })
+# ------------------------------------------------------------------------------ write ISO to USB
+function Show-UsbPicker([string]$Iso) {
+    <# Small dialog listing USB drives only. Returns the chosen disk, or $null. #>
+    [xml]$px = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        Title="Write to a USB drive" Width="520" SizeToContent="Height" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" Background="White" FontFamily="Segoe UI" FontSize="13">
+  <StackPanel Margin="20,16">
+    <TextBlock Text="Write the ISO to a USB drive" FontSize="15" FontWeight="SemiBold"/>
+    <TextBlock Name="TxtIsoName" Foreground="#5B6472" Margin="0,2,0,10"/>
+    <TextBlock TextWrapping="Wrap" Foreground="#5B6472" Margin="0,0,0,10"
+      Text="Only USB flash drives and external USB disks are listed. This PC's own disks never appear here. The drive you pick will be erased."/>
+    <DockPanel>
+      <Button Name="BtnRefresh" DockPanel.Dock="Right" Content="Refresh" Padding="12,4" Margin="6,0,0,0"/>
+      <ComboBox Name="CmbDrive"/>
+    </DockPanel>
+    <TextBlock Name="TxtHint" Foreground="#B42318" Margin="0,6,0,0" TextWrapping="Wrap"/>
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+      <Button Name="BtnCancel" Content="Not now" Padding="14,5" IsCancel="True"/>
+      <Button Name="BtnWrite" Content="Erase and write" Padding="18,5" Margin="8,0,0,0" FontWeight="SemiBold"
+              Background="#2563EB" Foreground="White" BorderBrush="#2563EB"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+'@
+    $dlg = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $px))
+    $dlg.Owner = $win
+    $c = @{}
+    foreach ($nm in 'TxtIsoName', 'BtnRefresh', 'CmbDrive', 'TxtHint', 'BtnCancel', 'BtnWrite') { $c[$nm] = $dlg.FindName($nm) }
+    $isoSize = (Get-Item $Iso).Length
+    $need = $isoSize + 64MB
+    $c.TxtIsoName.Text = ('{0}  ({1:N1} GB)' -f (Split-Path $Iso -Leaf), ($isoSize / 1GB))
+    $st = @{ Disks = @(); Chosen = $null }
+    $refresh = {
+        $c.CmbDrive.Items.Clear()
+        $st.Disks = @(Get-ForgeUsbDisks)
+        foreach ($d in $st.Disks) {
+            $t = $d.Label; if ($d.Size -lt $need) { $t += '   (too small)' }
+            [void]$c.CmbDrive.Items.Add($t)
+        }
+        if ($st.Disks.Count) { $c.CmbDrive.SelectedIndex = 0; $c.TxtHint.Text = '' }
+        else { $c.TxtHint.Text = 'No USB drive found. Plug one in (8 GB or bigger) and press Refresh.' }
+        $c.BtnWrite.IsEnabled = [bool]$st.Disks.Count
+    }.GetNewClosure()
+    $c.BtnRefresh.Add_Click($refresh)
+    $c.BtnWrite.Add_Click({
+        if ($c.CmbDrive.SelectedIndex -lt 0) { return }
+        $d = $st.Disks[$c.CmbDrive.SelectedIndex]
+        if ($d.Size -lt $need) { $c.TxtHint.Text = 'That drive is too small for this ISO.'; return }
+        $r = [Windows.MessageBox]::Show($dlg, "Everything on`n`n    $($d.Label)`n`nwill be erased. Continue?", 'Win11Forge', 'YesNo', 'Warning')
+        if ($r -eq 'Yes') { $st.Chosen = $d; $dlg.Close() }
+    }.GetNewClosure())
+    & $refresh
+    [void]$dlg.ShowDialog()
+    return $st.Chosen
+}
+
+function Start-UsbWrite([string]$Iso) {
+    if (-not $Iso -or -not (Test-Path $Iso -PathType Leaf)) {
+        $d = New-Object Microsoft.Win32.OpenFileDialog
+        $d.Filter = 'Windows ISO (*.iso)|*.iso|All files|*.*'; $d.Title = 'ISO to write'
+        if (-not $d.ShowDialog()) { return }
+        $Iso = $d.FileName
+    }
+    $disk = Show-UsbPicker -Iso $Iso
+    if (-not $disk) { return }
+    Add-Log ''
+    Start-ForgeJob -Kind 'usb' -Arg @{ Iso = $Iso; Disk = $disk.Number }
+}
+
+$ui.BtnUsb.Add_Click({ Start-UsbWrite -Iso $ui.TxtOutIso.Text })
+
+# Builds and USB writes run in a background runspace so the window stays responsive.
+$script:Sync = [hashtable]::Synchronized(@{ Queue = New-Object System.Collections.Concurrent.ConcurrentQueue[string]; Done = $false; Ok = $false; Kind = '' })
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(300)
 $timer.Add_Tick({
@@ -302,12 +391,48 @@ $timer.Add_Tick({
     if ($script:Sync.Done) {
         $timer.Stop()
         $ui.Prog.IsIndeterminate = $false; $ui.Prog.Value = if ($script:Sync.Ok) { 100 } else { 0 }
-        $ui.BtnBuild.IsEnabled = $true
+        $ui.BtnBuild.IsEnabled = $true; $ui.BtnUsb.IsEnabled = $true
         $script:Job.Dispose(); $script:Rs.Dispose()
-        $msg = if ($script:Sync.Ok) { 'Finished. See the log for where the output is.' } else { 'The build stopped with an error. See the log.' }
-        [void][Windows.MessageBox]::Show($msg, 'Win11Forge')
+        if ($script:Sync.Kind -eq 'usb') {
+            $msg = if ($script:Sync.Ok) { "The USB drive is ready. You can unplug it now.`n`nBoot the laptop from it with the F12 / F9 / Esc boot menu." } else { 'Writing the USB drive stopped with an error. See the log.' }
+            [void][Windows.MessageBox]::Show($msg, 'Win11Forge')
+        } elseif ($script:Sync.Ok -and $script:LastMode -eq 'ISO' -and (Test-Path $script:LastIso -PathType Leaf)) {
+            $r = [Windows.MessageBox]::Show("The ISO is ready:`n`n    $($script:LastIso)`n`nWrite it to a USB drive now?", 'Win11Forge', 'YesNo', 'Question')
+            if ($r -eq 'Yes') { Start-UsbWrite -Iso $script:LastIso }
+        } else {
+            $msg = if ($script:Sync.Ok) { 'Finished. See the log for where the output is.' } else { 'The build stopped with an error. See the log.' }
+            [void][Windows.MessageBox]::Show($msg, 'Win11Forge')
+        }
     }
 })
+
+function Start-ForgeJob([string]$Kind, $Arg) {
+    $ui.BtnBuild.IsEnabled = $false; $ui.BtnUsb.IsEnabled = $false
+    $ui.Prog.IsIndeterminate = $true
+    $script:Sync.Done = $false; $script:Sync.Ok = $false; $script:Sync.Kind = $Kind
+
+    $script:Rs = [runspacefactory]::CreateRunspace()
+    $script:Rs.ApartmentState = 'STA'
+    $script:Rs.Open()
+    $script:Job = [powershell]::Create()
+    $script:Job.Runspace = $script:Rs
+    [void]$script:Job.AddScript({
+        param($ModulePath, $Kind, $Arg, $Sync)
+        try {
+            Import-Module $ModulePath -Force
+            Set-ForgeLogger -Logger ({ param($m) $Sync.Queue.Enqueue($m) }.GetNewClosure())
+            if ($Kind -eq 'usb') { Write-ForgeIsoToUsb -IsoPath $Arg.Iso -DiskNumber $Arg.Disk }
+            else { Invoke-ForgeBuild -Options $Arg }
+            $Sync.Ok = $true
+        } catch {
+            $Sync.Queue.Enqueue("ERROR: $($_.Exception.Message)")
+        } finally {
+            $Sync.Done = $true
+        }
+    }).AddArgument($ModulePath).AddArgument($Kind).AddArgument($Arg).AddArgument($script:Sync)
+    [void]$script:Job.BeginInvoke()
+    $timer.Start()
+}
 
 $ui.BtnBuild.Add_Click({
     $o = Get-Options
@@ -320,30 +445,8 @@ $ui.BtnBuild.Add_Click({
         if ($r -ne 'Yes') { return }
     }
     $ui.TxtLog.Clear()
-    $ui.BtnBuild.IsEnabled = $false
-    $ui.Prog.IsIndeterminate = $true
-    $script:Sync.Done = $false; $script:Sync.Ok = $false
-
-    $script:Rs = [runspacefactory]::CreateRunspace()
-    $script:Rs.ApartmentState = 'STA'
-    $script:Rs.Open()
-    $script:Job = [powershell]::Create()
-    $script:Job.Runspace = $script:Rs
-    [void]$script:Job.AddScript({
-        param($ModulePath, $Options, $Sync)
-        try {
-            Import-Module $ModulePath -Force
-            Set-ForgeLogger -Logger ({ param($m) $Sync.Queue.Enqueue($m) }.GetNewClosure())
-            Invoke-ForgeBuild -Options $Options
-            $Sync.Ok = $true
-        } catch {
-            $Sync.Queue.Enqueue("ERROR: $($_.Exception.Message)")
-        } finally {
-            $Sync.Done = $true
-        }
-    }).AddArgument($ModulePath).AddArgument($o).AddArgument($script:Sync)
-    [void]$script:Job.BeginInvoke()
-    $timer.Start()
+    $script:LastMode = $o.Mode; $script:LastIso = $o.OutputIso
+    Start-ForgeJob -Kind 'build' -Arg $o
 })
 
 [void]$win.ShowDialog()
