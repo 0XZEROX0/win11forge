@@ -16,8 +16,8 @@ or copy `oscdimg.exe` into `tools\`.
 
 **Linux host.**
 ```bash
-sudo apt install wimtools libwin-hivex-perl xorriso parted dosfstools ntfs-3g python3-tk   # Debian/Ubuntu
-sudo dnf install wimlib-utils hivex xorriso parted dosfstools ntfs-3g python3-tkinter      # Fedora
+sudo apt install wimtools libwin-hivex-perl xorriso p7zip-full parted dosfstools ntfs-3g python3-tk   # Debian/Ubuntu
+sudo dnf install wimlib-utils hivex xorriso p7zip p7zip-plugins parted dosfstools ntfs-3g python3-tkinter      # Fedora
 ./win11forge.sh          # ISO output, no root needed
 sudo ./win11forge.sh     # Windows To Go output (it writes to a disk)
 ```
@@ -80,7 +80,7 @@ Start-Win11Forge.cmd       Windows launcher (elevates)
 Win11Forge.ps1             Windows GUI + headless mode
 modules/Forge.Core.psm1    Windows engine (DISM, reg.exe, bcdboot, oscdimg)
 win11forge.sh              Linux launcher
-linux/forge_engine.py      Linux engine (wimlib, hivex, xorriso, parted)
+linux/forge_engine.py      Linux engine (wimlib, hivex, 7-Zip, xorriso, parted)
 linux/win11forge.py        Linux GUI + CLI
 config/                    apps, registry tweaks, answer file template, generic setup keys (shared)
 scripts/firstlogon.ps1     runs once at first desktop: finishes debloat, keeps auto sign-in, driver scan

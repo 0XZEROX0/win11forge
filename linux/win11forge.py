@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from forge_engine import Engine, ForgeError, WINDOWS_TZ_CHOICES, host_defaults, load_json  # noqa: E402
+from forge_engine import Engine, ForgeError, INSTALL_HINT, WINDOWS_TZ_CHOICES, host_defaults, load_json  # noqa: E402
 
 
 def cli():
@@ -274,9 +274,8 @@ def gui():
     missing = Engine.missing_tools("WTG")
     if missing:
         logq.put("Missing tools: " + ", ".join(missing))
-        logq.put("  Debian/Ubuntu: sudo apt install wimtools libwin-hivex-perl xorriso parted dosfstools ntfs-3g")
-        logq.put("  Fedora:        sudo dnf install wimlib-utils hivex xorriso parted dosfstools ntfs-3g")
-        logq.put("  Arch:          sudo pacman -S wimlib hivex libisoburn parted dosfstools ntfs-3g")
+        for line in INSTALL_HINT.splitlines():
+            logq.put("  " + line)
     pump()
     root.mainloop()
 

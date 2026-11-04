@@ -4,7 +4,8 @@ Win11Forge Linux engine.
 Same job as modules/Forge.Core.psm1, built on Linux tools instead of DISM:
   wimlib-imagex   (wimtools)            export / edit / apply Windows images
   hivexregedit    (libwin-hivex-perl)   edit offline registry hives
-  xorriso                               read the source ISO and write the new one
+  7z (p7zip / 7zip)                     read the source ISO (Microsoft ISOs keep their files in UDF only)
+  xorriso                               write the new ISO
   parted, mkfs.vfat, mkfs.ntfs          only for Windows To Go (needs root)
 
 Differences from the Windows engine, by necessity:
@@ -29,8 +30,8 @@ from xml.sax.saxutils import escape
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "config"
 
-TOOLS_ISO = ["wimlib-imagex", "hivexregedit", "xorriso"]
-TOOLS_WTG = ["wimlib-imagex", "hivexregedit", "xorriso", "parted", "mkfs.vfat", "mkfs.ntfs", "lsblk", "wipefs", "mount", "umount"]
+TOOLS_ISO = ["wimlib-imagex", "hivexregedit", "xorriso", "7z"]
+TOOLS_WTG = ["wimlib-imagex", "hivexregedit", "xorriso", "7z", "parted", "mkfs.vfat", "mkfs.ntfs", "lsblk", "wipefs", "mount", "umount"]
 SPLIT_LIMIT = 4000 * 1024 * 1024
 HIVE_PREFIX = {"SOFT": r"HKEY_LOCAL_MACHINE\SOFTWARE", "SYS": r"HKEY_LOCAL_MACHINE\SYSTEM", "USER": r"HKEY_CURRENT_USER"}
 HIVE_FILE = {"SOFT": "SOFTWARE", "SYS": "SYSTEM", "USER": "NTUSER.DAT"}
@@ -54,8 +55,20 @@ LCID_KEYBOARDS = {"en-US": "0409:00000409", "en-GB": "0809:00000809", "ar-SA": "
                   "fr-FR": "040c:0000040c", "de-DE": "0407:00000407", "es-ES": "0c0a:0000040a", "tr-TR": "041f:0000041f"}
 
 
+INSTALL_HINT = ("Debian/Ubuntu: sudo apt install wimtools libwin-hivex-perl xorriso p7zip-full parted dosfstools ntfs-3g\n"
+                "Fedora:        sudo dnf install wimlib-utils hivex xorriso p7zip p7zip-plugins parted dosfstools ntfs-3g\n"
+                "Arch:          sudo pacman -S wimlib hivex libisoburn 7zip parted dosfstools ntfs-3g")
+
+
 class ForgeError(Exception):
     pass
+
+
+def find_7z():
+    for n in ("7z", "7zz", "7za"):
+        if shutil.which(n):
+            return n
+    return None
 
 
 def load_json(name):
@@ -90,7 +103,20 @@ class Engine:
 
     @staticmethod
     def missing_tools(mode):
-        return [t for t in (TOOLS_WTG if mode == "WTG" else TOOLS_ISO) if shutil.which(t) is None]
+        return [t for t in (TOOLS_WTG if mode == "WTG" else TOOLS_ISO)
+                if (find_7z() is None if t == "7z" else shutil.which(t) is None)]
+
+    def iso_extract(self, iso, dest, members=None, quiet=False):
+        """Copy files out of an ISO. Official Microsoft ISOs keep everything in a UDF file system
+        (the ISO9660 part only has a README), which xorriso cannot read, so 7-Zip is used."""
+        sz = find_7z()
+        if sz is None:
+            raise ForgeError("7-Zip is needed to read Windows ISOs (they use UDF).\n" + INSTALL_HINT)
+        Path(dest).mkdir(parents=True, exist_ok=True)
+        args = [sz, "x", "-y", "-bsp0", "-bso0", f"-o{dest}", str(iso)]
+        if members:
+            args += list(members)
+        self.run(args, ok=(0, 1), quiet=quiet)
 
     # ------------------------------------------------------------------ source
     def find_install(self, media):
@@ -107,16 +133,14 @@ class Engine:
         if Path(iso).is_dir():
             img = self.find_install(iso)
             return self.parse_info(self.run(["wimlib-imagex", "info", img], capture=True, quiet=True))
+        if not Path(iso).is_file():
+            raise ForgeError(f"ISO not found: {iso}")
         if scratch:
             Path(scratch).mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="forge-", dir=scratch) as tmp:
-            for name in ("install.wim", "install.esd"):
-                dst = Path(tmp) / name
-                r = subprocess.run(["xorriso", "-osirrox", "on", "-indev", str(iso), "-extract", "/sources/" + name, str(dst)],
-                                   capture_output=True, text=True)
-                if r.returncode == 0 and dst.exists():
-                    return self.parse_info(self.run(["wimlib-imagex", "info", dst], capture=True, quiet=True))
-        raise ForgeError("No sources/install.wim or install.esd inside the ISO. Is this a Windows 11 ISO?")
+            self.iso_extract(iso, tmp, ["sources/install.wim", "sources/install.esd", "sources/install.swm"], quiet=True)
+            img = self.find_install(tmp)
+            return self.parse_info(self.run(["wimlib-imagex", "info", img], capture=True, quiet=True))
 
     @staticmethod
     def parse_info(text):
@@ -285,7 +309,7 @@ class Engine:
             raise ForgeError(f"Pick a different user name; '{o['UserName']}' is reserved.")
         miss = self.missing_tools(o["Mode"])
         if miss:
-            raise ForgeError("Missing tools: " + ", ".join(miss) + "\nDebian/Ubuntu: sudo apt install wimtools libwin-hivex-perl xorriso parted dosfstools ntfs-3g\nFedora: sudo dnf install wimlib-utils hivex xorriso parted dosfstools ntfs-3g")
+            raise ForgeError("Missing tools: " + ", ".join(miss) + "\n" + INSTALL_HINT)
         if o["Mode"] == "WTG" and os.geteuid() != 0:
             raise ForgeError("Windows To Go needs root (run with sudo).")
 
@@ -303,7 +327,7 @@ class Engine:
         if Path(o["IsoPath"]).is_dir():
             shutil.copytree(o["IsoPath"], media)
         else:
-            self.run(["xorriso", "-osirrox", "on", "-indev", o["IsoPath"], "-extract", "/", media])
+            self.iso_extract(o["IsoPath"], media)
         self.run(["chmod", "-R", "u+w", media], quiet=True)
         src = self.find_install(media)
         eds = {e["Index"]: e for e in self.parse_info(self.run(["wimlib-imagex", "info", src], capture=True, quiet=True))}
