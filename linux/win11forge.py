@@ -56,8 +56,12 @@ def gui():
 
     root = tk.Tk()
     root.title("Win11Forge")
-    root.geometry("1180x800")
-    root.minsize(980, 620)
+    # Size everything from the real screen DPI so HiDPI / scaled desktops don't squash widgets.
+    k = max(1.0, root.winfo_fpixels("1i") / 96.0)
+    px = lambda n: int(n * k)  # noqa: E731
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"{min(px(1180), sw - 40)}x{min(px(800), sh - 80)}")
+    root.minsize(min(px(980), sw - 40), min(px(620), sh - 80))
     root.configure(background=BG)
 
     # ---------------------------------------------------------------- look
@@ -135,14 +139,14 @@ def gui():
 
     body = ttk.Frame(root, padding=(14, 14, 14, 14))
     body.pack(fill="both", expand=True)
-    body.columnconfigure(0, weight=0, minsize=540)
+    body.columnconfigure(0, weight=0, minsize=px(560))
     body.columnconfigure(1, weight=1)
     body.rowconfigure(0, weight=1)
 
     # ---------------------------------------------------------------- left: scrollable settings
     left_wrap = ttk.Frame(body)
     left_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
-    sc = tk.Canvas(left_wrap, width=540, highlightthickness=0, background=BG, borderwidth=0)
+    sc = tk.Canvas(left_wrap, width=px(560), highlightthickness=0, background=BG, borderwidth=0)
     vsb = ttk.Scrollbar(left_wrap, orient="vertical", command=sc.yview)
     sc.configure(yscrollcommand=vsb.set)
     vsb.pack(side="right", fill="y")
@@ -184,7 +188,7 @@ def gui():
         g.pack(fill="both", expand=True)
         ttk.Label(g, text=title, style="Head.TLabel").pack(anchor="w")
         if hint:
-            ttk.Label(g, text=hint, style="Hint.TLabel", wraplength=470, justify="left").pack(anchor="w", pady=(2, 0))
+            ttk.Label(g, text=hint, style="Hint.TLabel", wraplength=px(490), justify="left").pack(anchor="w", pady=(2, 0))
         ttk.Frame(g, style="Card.TFrame", height=8).pack(fill="x")
         return g
 
@@ -192,12 +196,14 @@ def gui():
         f = ttk.Frame(parent, style="Card.TFrame")
         f.pack(fill="x", pady=3)
         ttk.Label(f, text=label, width=14, style="Card.TLabel").pack(side="left")
-        e = ttk.Entry(f, textvariable=var, show=show or "")
-        e.pack(side="left", fill="x", expand=True)
-        widgets = [e]
+        widgets = []
         if browse:
-            bt = ttk.Button(f, text=browse_text, command=browse, width=8)
-            bt.pack(side="left", padx=(6, 0))
+            bt = ttk.Button(f, text=browse_text, command=browse)
+            bt.pack(side="right", padx=(6, 0))
+        e = ttk.Entry(f, textvariable=var, show=show or "", width=1)
+        e.pack(side="left", fill="x", expand=True)
+        widgets.append(e)
+        if browse:
             widgets.append(bt)
         return widgets
 
@@ -210,7 +216,10 @@ def gui():
             v["iso"].set(p)
             load_editions()
 
-    row(g, "ISO file", v["iso"], pick_iso)
+    iso_e = row(g, "ISO file", v["iso"], pick_iso, browse_text="Browse...")[0]
+    iso_e.bind("<Double-Button-1>", lambda e: pick_iso())
+    # a path typed or pasted by hand loads its editions on Enter
+    iso_e.bind("<Return>", lambda e: v["iso"].get().strip() and load_editions())
     f = ttk.Frame(g, style="Card.TFrame")
     f.pack(fill="x", pady=3)
     ttk.Label(f, text="Edition", width=14, style="Card.TLabel").pack(side="left")
@@ -325,7 +334,6 @@ def gui():
     f.pack(fill="x", pady=3)
     ttk.Label(f, text="USB drive", width=14, style="Card.TLabel").pack(side="left")
     cmb_usb = ttk.Combobox(f, textvariable=v["usb"], state="readonly", width=10)
-    cmb_usb.pack(side="left", fill="x", expand=True)
 
     def refresh_usb():
         state["disks"] = eng.usb_disks()
@@ -335,8 +343,9 @@ def gui():
         else:
             cmb_usb.set("")
             logq.put("No USB disks found. Plug in the drive and press Refresh.")
-    bt_usb = ttk.Button(f, text="Refresh", command=refresh_usb, width=8)
-    bt_usb.pack(side="left", padx=(6, 0))
+    bt_usb = ttk.Button(f, text="Refresh", command=refresh_usb)
+    bt_usb.pack(side="right", padx=(6, 0))
+    cmb_usb.pack(side="left", fill="x", expand=True)
     cb_port = ttk.Checkbutton(wtg_f, text="Strict Windows To Go mode (PortableOperatingSystem flag)", variable=b["portable"])
     cb_port.pack(anchor="w")
     wtg_w = [cmb_usb, bt_usb, cb_port]
