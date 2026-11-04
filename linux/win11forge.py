@@ -5,11 +5,16 @@ Win11Forge for Linux.
   GUI:        sudo ./win11forge.sh              (sudo only needed for Windows To Go)
   Headless:   ./win11forge.sh --config build.json
   Editions:   ./win11forge.sh --list-editions Win11.iso
+  USB stick:  sudo ./win11forge.sh --list-usb
+              sudo ./win11forge.sh --write-usb Win11-Forge.iso --disk /dev/sdX
 """
 import argparse
 import json
+import os
 import queue
 import re
+import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -23,8 +28,34 @@ def cli():
     ap.add_argument("--config", help="JSON file with build options (same keys as the Windows version)")
     ap.add_argument("--list-editions", metavar="ISO")
     ap.add_argument("--unattend", metavar="OUT.xml", help="only write the answer file, using --config options")
+    ap.add_argument("--list-usb", action="store_true", help="list the USB drives an ISO can be written to")
+    ap.add_argument("--write-usb", metavar="ISO", help="erase a USB drive and make it a bootable installer from this ISO")
+    ap.add_argument("--disk", help="the USB drive for --write-usb, e.g. /dev/sdb (see --list-usb)")
+    ap.add_argument("--yes", action="store_true", help="do not ask before erasing the --disk")
+    ap.add_argument("--progress-lines", action="store_true", help=argparse.SUPPRESS)  # used by the GUI
     a = ap.parse_args()
     eng = Engine()
+    if a.list_usb:
+        disks = eng.usb_disks()
+        for d in disks:
+            print(d["label"])
+        if not disks:
+            print("No USB drives found.")
+        return 0
+    if a.write_usb:
+        disks = {d["path"]: d for d in eng.usb_disks()}
+        if a.disk not in disks:
+            raise ForgeError("Pass --disk with one of these USB drives: " + (", ".join(disks) or "none plugged in"))
+        if not a.yes:
+            ans = input(f"Everything on {disks[a.disk]['label']} will be erased. Type YES to continue: ")
+            if ans.strip() != "YES":
+                print("Cancelled.")
+                return 1
+        if a.progress_lines:
+            eng.progress = lambda p: print(f"@progress {p}", flush=True)
+        eng.log = lambda m: print(m, flush=True)
+        eng.write_usb(a.write_usb, a.disk)
+        return 0
     if a.list_editions:
         for e in eng.editions(a.list_editions):
             print(f"{e['Index']:>2}  {e['Name']}  [{e['EditionId']}]  build {e['Build']}  {e['Language']}")
@@ -127,7 +158,7 @@ def gui():
         "mode": "ISO", "usb": ""}.items()}
     b = {k: tk.BooleanVar(value=val) for k, val in {
         "ads": True, "autologon": True, "bypass": True, "esd": False, "wipe": False, "portable": False}.items()}
-    state = {"editions": [], "disks": [], "busy": None, "t0": 0.0, "step": 0, "steps": 6}
+    state = {"editions": [], "disks": [], "busy": None, "job": None, "t0": 0.0, "step": 0, "steps": 6}
 
     # ---------------------------------------------------------------- header
     header = tk.Frame(root, background=LOG_BG, height=58)
@@ -454,7 +485,7 @@ def gui():
         log.configure(state="normal")
         log.delete("1.0", "end")
         log.configure(state="disabled")
-        state.update(busy="build", t0=time.time(), step=0, steps=6)
+        state.update(busy="build", job="build", t0=time.time(), step=0, steps=6)
         prog["pct"] = None
         bar.configure(mode="determinate", value=0)
         status.configure(text="Starting...", foreground=TEXT)
@@ -469,9 +500,127 @@ def gui():
                 logq.put(("__done__", False))
         threading.Thread(target=job, daemon=True).start()
 
+    # ---------------------------------------------------------------- write the ISO to a USB drive
+    def pick_usb_dialog(iso):
+        """Small window listing USB drives only. Returns the chosen disk dict, or None."""
+        dlg = tk.Toplevel(root)
+        dlg.title("Write to a USB drive")
+        dlg.configure(background=CARD)
+        dlg.transient(root)
+        dlg.resizable(False, False)
+        fr = ttk.Frame(dlg, style="Card.TFrame", padding=(20, 16, 20, 16))
+        fr.pack(fill="both", expand=True)
+        ttk.Label(fr, text="Write the ISO to a USB drive", style="Head.TLabel").pack(anchor="w")
+        ttk.Label(fr, text=f"{Path(iso).name}  ({Path(iso).stat().st_size / 1024 ** 3:.1f} GB)",
+                  style="Sub.TLabel").pack(anchor="w", pady=(2, 10))
+        ttk.Label(fr, text="Only USB flash drives and external USB disks are listed. This computer's own disks "
+                           "never appear here. The drive you pick will be erased.",
+                  style="Hint.TLabel", wraplength=px(440), justify="left").pack(anchor="w", pady=(0, 10))
+        rowf = ttk.Frame(fr, style="Card.TFrame")
+        rowf.pack(fill="x")
+        cmb = ttk.Combobox(rowf, state="readonly", width=46)
+        disks = []
+        need = Path(iso).stat().st_size + 64 * 1024 ** 2
+
+        def refresh():
+            disks[:] = [x for x in eng.usb_disks()]
+            cmb["values"] = [x["label"] + ("" if x["size"] >= need else "   (too small)") for x in disks]
+            if disks:
+                cmb.current(0)
+                hint.configure(text="")
+            else:
+                cmb.set("")
+                hint.configure(text="No USB drive found. Plug one in (8 GB or bigger) and press Refresh.")
+            ok_btn.state(["!disabled"] if disks else ["disabled"])
+        ttk.Button(rowf, text="Refresh", command=lambda: refresh()).pack(side="right", padx=(6, 0))
+        cmb.pack(side="left", fill="x", expand=True)
+        hint = ttk.Label(fr, text="", style="Hint.TLabel", foreground=BAD)
+        hint.pack(anchor="w", pady=(6, 0))
+        res = {"disk": None}
+
+        def go():
+            if cmb.current() < 0:
+                return
+            dsk = disks[cmb.current()]
+            if dsk["size"] < need:
+                hint.configure(text="That drive is too small for this ISO.")
+                return
+            if messagebox.askyesno("Win11Forge", f"Everything on\n\n    {dsk['label']}\n\nwill be erased. Continue?",
+                                   icon="warning", parent=dlg):
+                res["disk"] = dsk
+                dlg.destroy()
+        bf = ttk.Frame(fr, style="Card.TFrame")
+        bf.pack(fill="x", pady=(14, 0))
+        ok_btn = ttk.Button(bf, text="Erase and write", style="Accent.TButton", command=go)
+        ok_btn.pack(side="right")
+        ttk.Button(bf, text="Not now", command=dlg.destroy).pack(side="right", padx=(0, 8))
+        refresh()
+        dlg.update_idletasks()
+        x = root.winfo_rootx() + (root.winfo_width() - dlg.winfo_width()) // 2
+        y = root.winfo_rooty() + (root.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        dlg.grab_set()
+        root.wait_window(dlg)
+        return res["disk"]
+
+    def write_usb(iso=None):
+        if state["busy"]:
+            return
+        iso = iso or (str(Path(v["out"].get()).expanduser()) if v["out"].get().strip() else "")
+        if not iso or not Path(iso).is_file():
+            iso = filedialog.askopenfilename(title="ISO to write", filetypes=[("Windows ISO", "*.iso"), ("All files", "*")])
+            if not iso:
+                return
+        dsk = pick_usb_dialog(iso)
+        if not dsk:
+            return
+        btn_build.state(["disabled"])
+        btn_usb.state(["disabled"])
+        log.configure(state="normal")
+        log.insert("end", "\n")
+        log.configure(state="disabled")
+        state.update(busy="build", job="usb", t0=time.time(), step=0, steps=3)
+        prog["pct"] = None
+        bar.configure(mode="determinate", value=0)
+        status.configure(text="Writing the USB drive...", foreground=TEXT)
+        detail.configure(text=dsk["label"])
+
+        def job():
+            try:
+                if os.geteuid() == 0:
+                    eng.write_usb(iso, dsk["path"])
+                else:
+                    # Erasing a disk needs root: ask for the password with the desktop's polkit prompt.
+                    if not shutil.which("pkexec"):
+                        raise ForgeError("Writing a USB drive needs root. Restart Win11Forge with sudo, or run:\n"
+                                         f"sudo {Path(__file__).resolve().parent.parent / 'win11forge.sh'} "
+                                         f"--write-usb '{iso}' --disk {dsk['path']}")
+                    cmd = ["pkexec", sys.executable, str(Path(__file__).resolve()), "--write-usb", str(iso),
+                           "--disk", dsk["path"], "--yes", "--progress-lines"]
+                    logq.put("> " + " ".join(cmd[:2]) + " win11forge.py --write-usb ...")
+                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+                    for line in p.stdout:
+                        line = line.rstrip()
+                        if line.startswith("@progress "):
+                            prog["pct"] = int(line.split()[1])
+                        elif line.strip():
+                            logq.put(line)
+                    code = p.wait()
+                    if code in (126, 127):
+                        raise ForgeError("Root permission was not given, so the drive was not touched.")
+                    if code != 0:
+                        raise ForgeError("Writing the USB drive failed (see above).")
+                logq.put(("__done__", True))
+            except Exception as ex:  # noqa: BLE001
+                logq.put(f"ERROR: {ex}")
+                logq.put(("__done__", False))
+        threading.Thread(target=job, daemon=True).start()
+
     ttk.Button(btns, text="Save answer file only", command=save_unattend).pack(side="left")
     btn_build = ttk.Button(btns, text="Build", style="Accent.TButton", command=build)
     btn_build.pack(side="right")
+    btn_usb = ttk.Button(btns, text="Write ISO to USB...", command=write_usb)
+    btn_usb.pack(side="right", padx=(0, 8))
 
     def fmt_time(s):
         s = int(s)
@@ -484,22 +633,37 @@ def gui():
             return "step"
         if line.startswith("> "):
             return "cmd"
-        if line.startswith(("ISO ready", "Done in", "Windows To Go drive is ready")):
+        if line.startswith(("ISO ready", "Done in", "Windows To Go drive is ready", "USB drive is ready")):
             return "ok"
         return ()
 
     def finish(ok):
         dt = fmt_time(time.time() - state["t0"])
+        job = state["job"]
         state["busy"] = None
-        if ok:
-            bar.configure(value=1000)
-            status.configure(text="Finished", foreground=OK)
-            detail.configure(text=f"Completed in {dt}. The log shows where the output is.")
-        else:
+        btn_build.state(["!disabled"])
+        btn_usb.state(["!disabled"])
+        if not ok:
             status.configure(text="Stopped with an error", foreground=BAD)
             detail.configure(text="See the red lines in the log.")
-        btn_build.state(["!disabled"])
-        messagebox.showinfo("Win11Forge", "Finished. See the log for where the output is." if ok else "The build stopped with an error. See the log.")
+            what = "Writing the USB drive" if job == "usb" else "The build"
+            messagebox.showinfo("Win11Forge", f"{what} stopped with an error. See the log.")
+            return
+        bar.configure(value=1000)
+        if job == "usb":
+            status.configure(text="USB drive ready", foreground=OK)
+            detail.configure(text=f"Written in {dt}. Boot the laptop from it (F12 / F9 / Esc boot menu).")
+            messagebox.showinfo("Win11Forge", "The USB drive is ready. You can unplug it now.\n\n"
+                                              "Boot the laptop from it with the F12 / F9 / Esc boot menu.")
+            return
+        status.configure(text="Finished", foreground=OK)
+        detail.configure(text=f"Completed in {dt}. The log shows where the output is.")
+        iso = str(Path(v["out"].get()).expanduser())
+        if v["mode"].get() == "ISO" and Path(iso).is_file():
+            if messagebox.askyesno("Win11Forge", f"The ISO is ready:\n\n    {iso}\n\nWrite it to a USB drive now?"):
+                write_usb(iso)
+        else:
+            messagebox.showinfo("Win11Forge", "Finished. See the log for where the output is.")
 
     def pump():
         # Drain everything queued, then touch the widget once: no per-line redraws.

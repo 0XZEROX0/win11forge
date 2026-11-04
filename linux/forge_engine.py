@@ -6,7 +6,7 @@ Same job as modules/Forge.Core.psm1, built on Linux tools instead of DISM:
   hivexregedit    (libwin-hivex-perl)   edit offline registry hives
   7z (p7zip / 7zip)                     read the source ISO (Microsoft ISOs keep their files in UDF only)
   xorriso                               write the new ISO
-  parted, mkfs.vfat, mkfs.ntfs          only for Windows To Go (needs root)
+  parted, mkfs.vfat, mkfs.ntfs          only for Windows To Go and writing a USB installer (needs root)
 
 Differences from the Windows engine, by necessity:
   * Store apps are blocked offline (Deprovisioned registry keys, so they never install for the
@@ -31,6 +31,9 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "config"
 
 TOOLS_ISO = ["wimlib-imagex", "hivexregedit", "xorriso", "7z"]
+TOOLS_USB = ["parted", "mkfs.vfat", "lsblk", "wipefs", "mount", "umount", "findmnt"]
+SYSTEM_MOUNTS = {"/", "/boot", "/boot/efi", "/efi", "/home", "/usr", "/var", "/opt", "/srv", "[SWAP]"}
+FAT32_MAX = 4 * 1024 ** 3 - 1
 TOOLS_WTG = ["wimlib-imagex", "hivexregedit", "xorriso", "7z", "parted", "mkfs.vfat", "mkfs.ntfs", "lsblk", "wipefs", "mount", "umount"]
 SPLIT_LIMIT = 4000 * 1024 * 1024
 HIVE_PREFIX = {"SOFT": r"HKEY_LOCAL_MACHINE\SOFTWARE", "SYS": r"HKEY_LOCAL_MACHINE\SYSTEM", "USER": r"HKEY_CURRENT_USER"}
@@ -71,6 +74,14 @@ def find_7z():
     return None
 
 
+def quiet_run(args):
+    """Run a helper that is nice to have (partprobe, udevadm); missing is fine."""
+    try:
+        subprocess.run(args, capture_output=True)
+    except OSError:
+        pass
+
+
 def load_json(name):
     with open(CONFIG / name, encoding="utf-8") as f:
         return json.load(f)
@@ -107,7 +118,8 @@ class Engine:
 
     @staticmethod
     def missing_tools(mode):
-        return [t for t in (TOOLS_WTG if mode == "WTG" else TOOLS_ISO)
+        tools = {"WTG": TOOLS_WTG, "USB": TOOLS_USB}.get(mode, TOOLS_ISO)
+        return [t for t in tools
                 if (find_7z() is None if t == "7z" else shutil.which(t) is None)]
 
     def iso_extract(self, iso, dest, members=None, quiet=False):
@@ -280,20 +292,41 @@ class Engine:
 
     # ------------------------------------------------------------------ USB disks
     @staticmethod
-    def usb_disks():
-        out = subprocess.run(["lsblk", "-J", "-b", "-d", "-o", "NAME,PATH,SIZE,MODEL,TRAN,TYPE"], capture_output=True, text=True).stdout
-        root_disk = ""
+    def disk_of(path):
+        """The whole disk (e.g. /dev/sdb) that holds a file or mount point, or ''."""
         try:
-            src = subprocess.run(["findmnt", "-no", "SOURCE", "/"], capture_output=True, text=True).stdout.strip()
-            root_disk = subprocess.run(["lsblk", "-no", "PKNAME", src], capture_output=True, text=True).stdout.strip().splitlines()[0]
+            src = subprocess.run(["findmnt", "-nvo", "SOURCE", "-T", str(path)], capture_output=True, text=True).stdout.strip()
+            out = subprocess.run(["lsblk", "-npso", "NAME,TYPE", src], capture_output=True, text=True).stdout
+            disks = [l.split()[0] for l in out.splitlines() if l.split()[1:] == ["disk"]]
+            return disks[-1] if disks else ""
         except Exception:
-            pass
+            return ""
+
+    @staticmethod
+    def usb_disks(lsblk_json=None):
+        """USB disks only (flash drives, external SSDs). Never the disk Linux runs from, and never a
+        disk that holds a system mount (/, /boot, /home, swap...)."""
+        out = lsblk_json
+        if out is None:
+            out = subprocess.run(["lsblk", "-J", "-b", "-o", "NAME,PATH,SIZE,MODEL,TRAN,TYPE,RM,MOUNTPOINT"],
+                                 capture_output=True, text=True).stdout
+        root_disk = Engine.disk_of("/") if lsblk_json is None else ""
+
+        def mounts(node):
+            yield node.get("mountpoint")
+            for c in node.get("children") or []:
+                yield from mounts(c)
         disks = []
         for d in json.loads(out or '{"blockdevices":[]}')["blockdevices"]:
-            if d.get("type") == "disk" and d.get("tran") == "usb" and d.get("name") != root_disk:
-                gb = int(d.get("size") or 0) / 1e9
-                disks.append({"path": d["path"], "size": int(d.get("size") or 0),
-                              "label": f"{d['path']}: {(d.get('model') or 'USB disk').strip()} ({gb:.0f} GB)"})
+            if d.get("type") != "disk" or d.get("tran") != "usb" or d.get("path") == root_disk:
+                continue
+            if any(m and (m in SYSTEM_MOUNTS or m.startswith("/boot")) for m in mounts(d)):
+                continue
+            size = int(d.get("size") or 0)
+            if size == 0:  # empty card reader slot
+                continue
+            disks.append({"path": d["path"], "size": size,
+                          "label": f"{d['path']}: {(d.get('model') or 'USB disk').strip()} ({size / 1e9:.0f} GB)"})
         return disks
 
     def partitions(self, dev):
@@ -470,8 +503,8 @@ class Engine:
         # MBR + FAT32 first partition: boots on UEFI from both "removable" sticks and external SSDs.
         self.run(["parted", "-s", dev, "mklabel", "msdos", "mkpart", "primary", "fat32", "1MiB", "1025MiB",
                   "set", "1", "boot", "on", "mkpart", "primary", "ntfs", "1025MiB", "100%"])
-        subprocess.run(["partprobe", dev], capture_output=True)
-        subprocess.run(["udevadm", "settle"], capture_output=True)
+        quiet_run(["partprobe", dev])
+        quiet_run(["udevadm", "settle"])
         time.sleep(2)
         parts = self.partitions(dev)
         if len(parts) < 2:
@@ -515,6 +548,146 @@ class Engine:
         shutil.rmtree(media, ignore_errors=True)
         self.log("Windows To Go drive is ready (UEFI). On its first boot it spends ~30 seconds finishing")
         self.log("its boot files, restarts by itself, then goes straight to the desktop.")
+
+
+    # ------------------------------------------------------------------ write a finished ISO to a USB stick
+    def write_usb(self, iso, dev, allow_non_usb=False):
+        """Erase a USB drive and turn it into a bootable Windows installer from a Windows ISO.
+
+        One FAT32 partition on MBR, the ISO's files copied onto it. That boots on every UEFI laptop,
+        with Secure Boot on. (Plain `dd` of a Windows ISO does not boot from USB.) A >4 GB install.wim
+        is split into install.swm parts so it fits on FAT32; Windows Setup reads those directly."""
+        iso = Path(iso).expanduser().resolve()
+        if not iso.is_file():
+            raise ForgeError(f"ISO not found: {iso}")
+        miss = self.missing_tools("USB")
+        if miss:
+            raise ForgeError("Missing tools: " + ", ".join(miss) + "\n" + INSTALL_HINT)
+        if os.geteuid() != 0:
+            raise ForgeError("Writing a USB drive needs root (run with sudo).")
+        info = {d["path"]: d for d in self.usb_disks()}
+        if dev not in info and not allow_non_usb:
+            raise ForgeError(f"{dev} is not a removable USB drive (or it holds the running system). Refusing.")
+        if self.disk_of(iso) == dev:
+            raise ForgeError(f"The ISO is stored on {dev} itself. Copy it somewhere else first.")
+        size = info[dev]["size"] if dev in info else int(self.run(["lsblk", "-bdno", "SIZE", dev], capture=True, quiet=True).strip() or 0)
+        need = iso.stat().st_size + 64 * 1024 ** 2
+        if size and size < need:
+            raise ForgeError(f"{dev} is too small ({size / 1e9:.1f} GB) for this ISO ({need / 1e9:.1f} GB).")
+
+        t0 = time.time()
+        self.log("Step 1/3  Erasing and partitioning " + dev)
+        for line in self.run(["lsblk", "-lnpo", "NAME,MOUNTPOINT", dev], capture=True, quiet=True).splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[1].strip():
+                self.run(["umount", parts[0]], ok=(0, 32))
+        self.run(["wipefs", "-a", dev])
+        self.run(["parted", "-s", dev, "mklabel", "msdos", "mkpart", "primary", "fat32", "1MiB", "100%",
+                  "set", "1", "boot", "on", "set", "1", "lba", "on"])
+        quiet_run(["partprobe", dev])
+        quiet_run(["udevadm", "settle"])
+        part = None
+        for _ in range(20):
+            parts = self.partitions(dev)
+            if parts and Path(parts[0]).exists():
+                part = parts[0]
+                break
+            time.sleep(0.5)
+        if not part:
+            raise ForgeError("The new partition did not appear after partitioning.")
+        self.run(["mkfs.vfat", "-F", "32", "-n", "WIN11FORGE", part])
+
+        self.log("Step 2/3  Copying Windows installer files")
+        dst = Path(tempfile.mkdtemp(prefix="forge-usb-"))
+        src = Path(tempfile.mkdtemp(prefix="forge-iso-"))
+        iso_mounted = usb_mounted = False
+        try:
+            self.run(["mount", "-o", "flush", part, dst])
+            usb_mounted = True
+            try:
+                self.run(["mount", "-o", "loop,ro", iso, src], quiet=True)
+                iso_mounted = True
+                if not (src / "sources").is_dir():  # the ISO9660 view of a UDF-only image: just a README
+                    self.run(["umount", src], quiet=True)
+                    iso_mounted = False
+                    self.run(["mount", "-t", "udf", "-o", "loop,ro", iso, src], quiet=True)
+                    iso_mounted = True
+            except ForgeError:
+                iso_mounted = False
+            if iso_mounted and (src / "sources").is_dir():
+                self.copy_tree_progress(src, dst)
+            else:
+                self.log("  cannot loop-mount the ISO here, extracting it with 7-Zip instead")
+                if iso_mounted:
+                    self.run(["umount", src], quiet=True)
+                    iso_mounted = False
+                stage = src / "x"
+                self.iso_extract(iso, stage)
+                self.copy_tree_progress(stage, dst)
+            if not (dst / "efi" / "boot" / "bootx64.efi").exists():  # vfat lookups ignore case
+                self.log("  warning: no efi/boot/bootx64.efi on the ISO, the stick may not boot on UEFI")
+            self.log("Step 3/3  Flushing data to the drive (do not unplug)")
+        finally:
+            subprocess.run(["sync"])
+            if iso_mounted:
+                subprocess.run(["umount", str(src)], capture_output=True)
+            if usb_mounted:
+                self.run(["umount", dst])
+            shutil.rmtree(src, ignore_errors=True)
+            try:
+                dst.rmdir()
+            except OSError:
+                pass
+        self.log(f"USB drive is ready: {dev}. Boot the laptop from it (F12 / F9 / Esc boot menu, UEFI).")
+        self.log(f"Done in {(time.time() - t0) / 60:.0f} minutes.")
+
+    def copy_tree_progress(self, src, dst):
+        """Copy a folder to a FAT32 stick with real progress (data is flushed as it goes, so the
+        percentage tracks what is actually on the drive, not what sits in the page cache)."""
+        src, dst = Path(src), Path(dst)
+        files = [p for p in src.rglob("*") if p.is_file()]
+        big = [p for p in files if p.stat().st_size > FAT32_MAX]
+        for p in big:
+            if p.relative_to(src).as_posix().lower() not in ("sources/install.wim", "sources/install.esd"):
+                raise ForgeError(f"{p.relative_to(src)} is over 4 GB and cannot go on a FAT32 drive.")
+        total = sum(p.stat().st_size for p in files) or 1
+        done, last = 0, -1
+        chunk = 8 * 1024 * 1024
+        for p in files:
+            rel = p.relative_to(src)
+            if p in big:
+                continue
+            out = dst / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "rb") as fi, open(out, "wb") as fo:
+                since_sync = 0
+                while True:
+                    b = fi.read(chunk)
+                    if not b:
+                        break
+                    fo.write(b)
+                    done += len(b)
+                    since_sync += len(b)
+                    if since_sync >= 64 * 1024 * 1024:
+                        fo.flush()
+                        os.fdatasync(fo.fileno())
+                        since_sync = 0
+                    pct = int(done * 100 / total)
+                    if pct != last:
+                        last = pct
+                        if self.progress:
+                            self.progress(pct)
+                        if pct % 10 == 0 and pct:
+                            self.log(f"  copied {pct}% ({done / 1024 ** 3:.1f} of {total / 1024 ** 3:.1f} GB)")
+                fo.flush()
+                os.fsync(fo.fileno())
+        for p in big:
+            self.log(f"  {p.name} is over 4 GB, splitting it into install.swm parts for FAT32")
+            (dst / "sources").mkdir(exist_ok=True)
+            self.run(["wimlib-imagex", "split", p, dst / "sources" / "install.swm", "3800"], quiet=True)
+            done += p.stat().st_size
+            if self.progress:
+                self.progress(100)
 
 
 def host_defaults():

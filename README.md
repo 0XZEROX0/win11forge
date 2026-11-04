@@ -28,8 +28,23 @@ Then:
 3. **Drivers.** Optional: add folders of extracted driver packs (see below).
 4. **First boot.** Set the user name, an optional password, language, keyboard and time zone.
 5. **Output.** Choose ISO or a USB disk, then press **Build**. A build takes about 20 to 40 minutes.
+6. **Burn to USB (optional).** When an ISO finishes, Win11Forge asks whether to write it to a USB drive. Say yes, pick the
+   drive and confirm, and it becomes a bootable installer. The **Write ISO to USB...** button does the same for any ISO later.
 
 Headless: `Win11Forge.ps1 -Config build.json` or `./win11forge.sh --config build.json` (see `build.example.json`).
+## Writing the ISO to a USB drive
+
+- Only **USB** drives are listed (flash drives, external USB disks). The disk the PC runs from, internal SATA/NVMe disks,
+  disks holding system mounts and the drive the ISO itself is stored on are never offered or are refused.
+- You confirm the drive once more before it is erased.
+- The drive gets one FAT32 partition with the ISO's files, which boots on every UEFI laptop with Secure Boot on. A
+  `install.wim` over 4 GB is split into `install.swm` parts automatically (Windows Setup reads those directly).
+  On Windows the stick also gets legacy BIOS boot code (`bootsect`); Linux-written sticks are UEFI only.
+- On Linux, writing a drive needs root. If you started the app without sudo it asks for your password through the
+  desktop's normal prompt (`pkexec`). From a terminal: `sudo ./win11forge.sh --list-usb`, then
+  `sudo ./win11forge.sh --write-usb Win11-Forge.iso --disk /dev/sdX`.
+- On Windows from a terminal: `Win11Forge.ps1 -ListUsb`, then `Win11Forge.ps1 -WriteUsb .\Win11-Forge.iso -Disk 2`.
+
 The **Save answer file only** button writes just `autounattend.xml`. You can drop that file into any Windows 11 USB stick, including one made with Rufus.
 
 ## What it does to the image
@@ -68,7 +83,7 @@ On Linux they are staged in `C:\Windows\Setup\Drivers` (installed with `pnputil`
 
 ## Safety and licensing
 
-- The tool only reads the ISO you give it. It never touches the disk it is running from, and for Windows To Go it only lists **USB** disks and asks before wiping one.
+- The tool only reads the ISO you give it. It never touches the disk it is running from, and for Windows To Go and USB installers it only lists **USB** disks and asks before wiping one.
 - "Fully hands-off: wipe disk 0" is off by default. With it off, setup still stops once to ask which disk to install on, which protects the machine's data. Turn it on only for media you use on machines you intend to wipe.
 - `autounattend.xml` / `unattend.xml` hold the account password in plain text. Leave the password empty, or keep the USB drive safe.
 - **No activation is bypassed.** The answer file uses Microsoft's public *generic setup key* (`config/editions.json`) only so that setup does not stop to ask for a key. Windows activates as usual from the laptop's digital or OEM license, or from your own key.
@@ -91,4 +106,7 @@ winpe-finish/              one-time boot fix-up used by Linux-built Windows To G
 
 - **Linux ISO pipeline:** tested end to end on a synthetic Windows image. It extracts the edition, blocks apps through Deprovisioned keys, merges registry hives, stages drivers, writes a valid answer file and builds a BIOS+UEFI El Torito ISO. The camera app was kept as intended.
 - **Answer file:** generated for ISO, ISO with wipe, and WTG modes, and parsed as valid XML.
+- **Write ISO to USB (Linux):** partitioning, the copy with progress, the >4 GB split and the drive filter were tested on
+  a loop device and fake disk lists, and the drive picker in the GUI. Not yet tried on a real USB stick.
+- **Write ISO to USB (Windows):** written but not yet run.
 - **Windows engine, both GUIs and Windows To Go on either OS:** written but **not yet run on real hardware**. Please try a first build in a VM (Hyper-V or VirtualBox, with EFI enabled) before using it on a laptop.
