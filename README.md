@@ -16,8 +16,8 @@ or copy `oscdimg.exe` into `tools\`.
 
 **Linux host.**
 ```bash
-sudo apt install wimtools libwin-hivex-perl xorriso p7zip-full parted dosfstools ntfs-3g python3-tk   # Debian/Ubuntu
-sudo dnf install wimlib-utils hivex xorriso p7zip p7zip-plugins parted dosfstools ntfs-3g python3-tkinter      # Fedora
+sudo apt install wimtools libwin-hivex-perl xorriso p7zip-full parted dosfstools exfatprogs ntfs-3g python3-tk   # Debian/Ubuntu
+sudo dnf install wimlib-utils hivex xorriso p7zip p7zip-plugins parted dosfstools exfatprogs ntfs-3g python3-tkinter      # Fedora
 ./win11forge.sh          # ISO output, no root needed
 sudo ./win11forge.sh     # Windows To Go output (it writes to a disk)
 ```
@@ -37,8 +37,9 @@ Headless: `Win11Forge.ps1 -Config build.json` or `./win11forge.sh --config build
 - Only **USB** drives are listed (flash drives, external USB disks). The disk the PC runs from, internal SATA/NVMe disks,
   disks holding system mounts and the drive the ISO itself is stored on are never offered or are refused.
 - You confirm the drive once more before it is erased.
-- The drive gets one FAT32 partition with the ISO's files, which boots on every UEFI laptop with Secure Boot on. A
-  `install.wim` over 4 GB is split into `install.swm` parts automatically (Windows Setup reads those directly).
+- The drive gets two partitions. **WINBOOT** is a small FAT32 partition (1.5 GB) with only the boot files, which
+  boots on every UEFI laptop with Secure Boot on. **WIN11FORGE** is exFAT and takes the rest of the drive: it holds the
+  whole installer with `install.wim` kept in one piece, and you can store your own files over 4 GB on it.
   On Windows the stick also gets legacy BIOS boot code (`bootsect`); Linux-written sticks are UEFI only.
 - On Linux, writing a drive needs root. If you started the app without sudo it asks for your password through the
   desktop's normal prompt (`pkexec`). From a terminal: `sudo ./win11forge.sh --list-usb`, then

@@ -6,7 +6,7 @@ Same job as modules/Forge.Core.psm1, built on Linux tools instead of DISM:
   hivexregedit    (libwin-hivex-perl)   edit offline registry hives
   7z (p7zip / 7zip)                     read the source ISO (Microsoft ISOs keep their files in UDF only)
   xorriso                               write the new ISO
-  parted, mkfs.vfat, mkfs.ntfs          only for Windows To Go and writing a USB installer (needs root)
+  parted, mkfs.vfat/exfat, mkfs.ntfs    only for Windows To Go and writing a USB installer (needs root)
 
 Differences from the Windows engine, by necessity:
   * Store apps are blocked offline (Deprovisioned registry keys, so they never install for the
@@ -31,9 +31,9 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "config"
 
 TOOLS_ISO = ["wimlib-imagex", "hivexregedit", "xorriso", "7z"]
-TOOLS_USB = ["parted", "mkfs.vfat", "lsblk", "wipefs", "mount", "umount", "findmnt"]
+TOOLS_USB = ["parted", "mkfs.vfat", "mkfs.exfat", "lsblk", "wipefs", "mount", "umount", "findmnt"]
 SYSTEM_MOUNTS = {"/", "/boot", "/boot/efi", "/efi", "/home", "/usr", "/var", "/opt", "/srv", "[SWAP]"}
-FAT32_MAX = 4 * 1024 ** 3 - 1
+BOOT_PART_MIB = 1536  # FAT32 boot partition of a USB installer: efi, boot, bootmgr, boot.wim
 TOOLS_WTG = ["wimlib-imagex", "hivexregedit", "xorriso", "7z", "parted", "mkfs.vfat", "mkfs.ntfs", "lsblk", "wipefs", "mount", "umount"]
 SPLIT_LIMIT = 4000 * 1024 * 1024
 HIVE_PREFIX = {"SOFT": r"HKEY_LOCAL_MACHINE\SOFTWARE", "SYS": r"HKEY_LOCAL_MACHINE\SYSTEM", "USER": r"HKEY_CURRENT_USER"}
@@ -58,9 +58,9 @@ LCID_KEYBOARDS = {"en-US": "0409:00000409", "en-GB": "0809:00000809", "ar-SA": "
                   "fr-FR": "040c:0000040c", "de-DE": "0407:00000407", "es-ES": "0c0a:0000040a", "tr-TR": "041f:0000041f"}
 
 
-INSTALL_HINT = ("Debian/Ubuntu: sudo apt install wimtools libwin-hivex-perl xorriso p7zip-full parted dosfstools ntfs-3g\n"
-                "Fedora:        sudo dnf install wimlib-utils hivex xorriso p7zip p7zip-plugins parted dosfstools ntfs-3g\n"
-                "Arch:          sudo pacman -S wimlib hivex libisoburn 7zip parted dosfstools ntfs-3g")
+INSTALL_HINT = ("Debian/Ubuntu: sudo apt install wimtools libwin-hivex-perl xorriso p7zip-full parted dosfstools exfatprogs ntfs-3g\n"
+                "Fedora:        sudo dnf install wimlib-utils hivex xorriso p7zip p7zip-plugins parted dosfstools exfatprogs ntfs-3g\n"
+                "Arch:          sudo pacman -S wimlib hivex libisoburn 7zip parted dosfstools exfatprogs ntfs-3g")
 
 
 class ForgeError(Exception):
@@ -554,9 +554,13 @@ class Engine:
     def write_usb(self, iso, dev, allow_non_usb=False):
         """Erase a USB drive and turn it into a bootable Windows installer from a Windows ISO.
 
-        One FAT32 partition on MBR, the ISO's files copied onto it. That boots on every UEFI laptop,
-        with Secure Boot on. (Plain `dd` of a Windows ISO does not boot from USB.) A >4 GB install.wim
-        is split into install.swm parts so it fits on FAT32; Windows Setup reads those directly."""
+        Two partitions on MBR (plain `dd` of a Windows ISO does not boot from USB):
+          1. WINBOOT, FAT32, about 1.5 GB: only the boot files (efi, boot, bootmgr, sources/boot.wim).
+             UEFI firmware can only be relied on to read FAT32, so this is what the laptop boots, with
+             Secure Boot on.
+          2. WIN11FORGE, exFAT, the rest of the drive: every file of the ISO, with install.wim kept
+             whole (no 4 GB limit, no install.swm splitting). Windows Setup finds it there by itself,
+             and you can keep your own files over 4 GB on it too."""
         iso = Path(iso).expanduser().resolve()
         if not iso.is_file():
             raise ForgeError(f"ISO not found: {iso}")
@@ -571,7 +575,7 @@ class Engine:
         if self.disk_of(iso) == dev:
             raise ForgeError(f"The ISO is stored on {dev} itself. Copy it somewhere else first.")
         size = info[dev]["size"] if dev in info else int(self.run(["lsblk", "-bdno", "SIZE", dev], capture=True, quiet=True).strip() or 0)
-        need = iso.stat().st_size + 64 * 1024 ** 2
+        need = iso.stat().st_size + BOOT_PART_MIB * 1024 ** 2 + 64 * 1024 ** 2
         if size and size < need:
             raise ForgeError(f"{dev} is too small ({size / 1e9:.1f} GB) for this ISO ({need / 1e9:.1f} GB).")
 
@@ -582,28 +586,35 @@ class Engine:
             if len(parts) == 2 and parts[1].strip():
                 self.run(["umount", parts[0]], ok=(0, 32))
         self.run(["wipefs", "-a", dev])
-        self.run(["parted", "-s", dev, "mklabel", "msdos", "mkpart", "primary", "fat32", "1MiB", "100%",
-                  "set", "1", "boot", "on", "set", "1", "lba", "on"])
+        boot_end = f"{1 + BOOT_PART_MIB}MiB"
+        # parted has no "exfat" type; type 0x07 (ntfs) is also the MBR id for exFAT.
+        self.run(["parted", "-s", dev, "mklabel", "msdos",
+                  "mkpart", "primary", "fat32", "1MiB", boot_end, "set", "1", "boot", "on", "set", "1", "lba", "on",
+                  "mkpart", "primary", "ntfs", boot_end, "100%"])
         quiet_run(["partprobe", dev])
         quiet_run(["udevadm", "settle"])
-        part = None
+        parts = []
         for _ in range(20):
             parts = self.partitions(dev)
-            if parts and Path(parts[0]).exists():
-                part = parts[0]
+            if len(parts) >= 2 and all(Path(p).exists() for p in parts[:2]):
                 break
             time.sleep(0.5)
-        if not part:
-            raise ForgeError("The new partition did not appear after partitioning.")
-        self.run(["mkfs.vfat", "-F", "32", "-n", "WIN11FORGE", part])
+        if len(parts) < 2:
+            raise ForgeError("The new partitions did not appear after partitioning.")
+        bootp, datap = parts[0], parts[1]
+        self.run(["mkfs.vfat", "-F", "32", "-n", "WINBOOT", bootp])
+        self.run(["mkfs.exfat", "-L", "WIN11FORGE", datap])
 
         self.log("Step 2/3  Copying Windows installer files")
-        dst = Path(tempfile.mkdtemp(prefix="forge-usb-"))
+        bdst = Path(tempfile.mkdtemp(prefix="forge-usbboot-"))
+        ddst = Path(tempfile.mkdtemp(prefix="forge-usbdata-"))
         src = Path(tempfile.mkdtemp(prefix="forge-iso-"))
-        iso_mounted = usb_mounted = False
+        iso_mounted = boot_mounted = data_mounted = False
         try:
-            self.run(["mount", "-o", "flush", part, dst])
-            usb_mounted = True
+            self.run(["mount", "-o", "flush", bootp, bdst])
+            boot_mounted = True
+            self.run(["mount", datap, ddst])
+            data_mounted = True
             try:
                 self.run(["mount", "-o", "loop,ro", iso, src], quiet=True)
                 iso_mounted = True
@@ -614,52 +625,61 @@ class Engine:
                     iso_mounted = True
             except ForgeError:
                 iso_mounted = False
-            if iso_mounted and (src / "sources").is_dir():
-                self.copy_tree_progress(src, dst)
-            else:
+            root = src
+            if not (iso_mounted and (src / "sources").is_dir()):
                 self.log("  cannot loop-mount the ISO here, extracting it with 7-Zip instead")
                 if iso_mounted:
                     self.run(["umount", src], quiet=True)
                     iso_mounted = False
-                stage = src / "x"
-                self.iso_extract(iso, stage)
-                self.copy_tree_progress(stage, dst)
-            if not (dst / "efi" / "boot" / "bootx64.efi").exists():  # vfat lookups ignore case
+                root = src / "x"
+                self.iso_extract(iso, root)
+            self.copy_files(self.usb_plan(root, bdst, ddst))
+            if not (bdst / "efi" / "boot" / "bootx64.efi").exists():  # vfat lookups ignore case
                 self.log("  warning: no efi/boot/bootx64.efi on the ISO, the stick may not boot on UEFI")
             self.log("Step 3/3  Flushing data to the drive (do not unplug)")
         finally:
             subprocess.run(["sync"])
             if iso_mounted:
                 subprocess.run(["umount", str(src)], capture_output=True)
-            if usb_mounted:
-                self.run(["umount", dst])
+            for mounted, m in ((boot_mounted, bdst), (data_mounted, ddst)):
+                if mounted:
+                    self.run(["umount", m])
             shutil.rmtree(src, ignore_errors=True)
-            try:
-                dst.rmdir()
-            except OSError:
-                pass
+            for m in (bdst, ddst):
+                try:
+                    m.rmdir()
+                except OSError:
+                    pass
         self.log(f"USB drive is ready: {dev}. Boot the laptop from it (F12 / F9 / Esc boot menu, UEFI).")
+        self.log("The WIN11FORGE partition is exFAT, so files over 4 GB fit on it.")
         self.log(f"Done in {(time.time() - t0) / 60:.0f} minutes.")
 
-    def copy_tree_progress(self, src, dst):
-        """Copy a folder to a FAT32 stick with real progress (data is flushed as it goes, so the
+    @staticmethod
+    def usb_plan(root, boot_dst, data_dst):
+        """Which ISO files go where on the two-partition stick: a list of (source, destination).
+        Every file goes to the exFAT data partition. The boot files (and autounattend.xml, so Setup
+        sees it whichever partition it looks at first) also go to the small FAT32 boot partition."""
+        root = Path(root)
+        plan = []
+        for p in sorted(root.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(root)
+            low = rel.as_posix().lower()
+            plan.append((p, Path(data_dst) / rel))
+            if (low.split("/")[0] in ("efi", "boot") or low in ("bootmgr", "bootmgr.efi", "autounattend.xml", "sources/boot.wim")):
+                plan.append((p, Path(boot_dst) / rel))
+        return plan
+
+    def copy_files(self, plan):
+        """Copy (source, destination) pairs with real progress (data is flushed as it goes, so the
         percentage tracks what is actually on the drive, not what sits in the page cache)."""
-        src, dst = Path(src), Path(dst)
-        files = [p for p in src.rglob("*") if p.is_file()]
-        big = [p for p in files if p.stat().st_size > FAT32_MAX]
-        for p in big:
-            if p.relative_to(src).as_posix().lower() not in ("sources/install.wim", "sources/install.esd"):
-                raise ForgeError(f"{p.relative_to(src)} is over 4 GB and cannot go on a FAT32 drive.")
-        total = sum(p.stat().st_size for p in files) or 1
+        total = sum(s.stat().st_size for s, _ in plan) or 1
         done, last = 0, -1
         chunk = 8 * 1024 * 1024
-        for p in files:
-            rel = p.relative_to(src)
-            if p in big:
-                continue
-            out = dst / rel
+        for s, out in plan:
             out.parent.mkdir(parents=True, exist_ok=True)
-            with open(p, "rb") as fi, open(out, "wb") as fo:
+            with open(s, "rb") as fi, open(out, "wb") as fo:
                 since_sync = 0
                 while True:
                     b = fi.read(chunk)
@@ -681,13 +701,6 @@ class Engine:
                             self.log(f"  copied {pct}% ({done / 1024 ** 3:.1f} of {total / 1024 ** 3:.1f} GB)")
                 fo.flush()
                 os.fsync(fo.fileno())
-        for p in big:
-            self.log(f"  {p.name} is over 4 GB, splitting it into install.swm parts for FAT32")
-            (dst / "sources").mkdir(exist_ok=True)
-            self.run(["wimlib-imagex", "split", p, dst / "sources" / "install.swm", "3800"], quiet=True)
-            done += p.stat().st_size
-            if self.progress:
-                self.progress(100)
 
 
 def host_defaults():
