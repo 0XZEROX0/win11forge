@@ -16,8 +16,8 @@ or copy `oscdimg.exe` into `tools\`.
 
 **Linux host.**
 ```bash
-sudo apt install wimtools libwin-hivex-perl xorriso p7zip-full parted dosfstools ntfs-3g python3-tk   # Debian/Ubuntu
-sudo dnf install wimlib-utils hivex xorriso p7zip p7zip-plugins parted dosfstools ntfs-3g python3-tkinter      # Fedora
+sudo apt install wimtools libwin-hivex-perl xorriso p7zip-full parted dosfstools exfatprogs ntfs-3g python3-tk   # Debian/Ubuntu
+sudo dnf install wimlib-utils hivex xorriso p7zip p7zip-plugins parted dosfstools exfatprogs ntfs-3g python3-tkinter      # Fedora
 ./win11forge.sh          # ISO output, no root needed
 sudo ./win11forge.sh     # Windows To Go output (it writes to a disk)
 ```
@@ -37,13 +37,19 @@ Headless: `Win11Forge.ps1 -Config build.json` or `./win11forge.sh --config build
 - Only **USB** drives are listed (flash drives, external USB disks). The disk the PC runs from, internal SATA/NVMe disks,
   disks holding system mounts and the drive the ISO itself is stored on are never offered or are refused.
 - You confirm the drive once more before it is erased.
-- The drive gets one FAT32 partition with the ISO's files, which boots on every UEFI laptop with Secure Boot on. A
-  `install.wim` over 4 GB is split into `install.swm` parts automatically (Windows Setup reads those directly).
-  On Windows the stick also gets legacy BIOS boot code (`bootsect`); Linux-written sticks are UEFI only.
+- You pick the format in the same window:
+  - **exFAT (default).** A small FAT32 boot partition (`FORGEBOOT`, about 1.2 GB: the UEFI boot files and
+    `sources/boot.wim`) followed by an exFAT partition (`WIN11FORGE`) with the whole installer, `install.wim` in one
+    piece, filling the rest of the drive. Use the free space for your own files, including files over 4 GB.
+    The laptop boots Microsoft's own signed boot files from the FAT32 partition, so it works with **Secure Boot on**;
+    Windows Setup then finds `install.wim` on the exFAT partition by itself. Drives over 2 TB get GPT instead of MBR.
+  - **FAT32 only.** One FAT32 partition with the ISO's files. A `install.wim` over 4 GB is split into `install.swm`
+    parts (Windows Setup reads those directly). Use it if a very old laptop does not boot the exFAT layout.
+  - On Windows, MBR drives also get legacy BIOS boot code (`bootsect`); Linux-written drives are UEFI only.
 - On Linux, writing a drive needs root. If you started the app without sudo it asks for your password through the
   desktop's normal prompt (`pkexec`). From a terminal: `sudo ./win11forge.sh --list-usb`, then
-  `sudo ./win11forge.sh --write-usb Win11-Forge.iso --disk /dev/sdX`.
-- On Windows from a terminal: `Win11Forge.ps1 -ListUsb`, then `Win11Forge.ps1 -WriteUsb .\Win11-Forge.iso -Disk 2`.
+  `sudo ./win11forge.sh --write-usb Win11-Forge.iso --disk /dev/sdX` (add `--usb-format fat32` for FAT32 only).
+- On Windows from a terminal: `Win11Forge.ps1 -ListUsb`, then `Win11Forge.ps1 -WriteUsb .\Win11-Forge.iso -Disk 2` (add `-UsbFormat FAT32` for FAT32 only).
 
 The **Save answer file only** button writes just `autounattend.xml`. You can drop that file into any Windows 11 USB stick, including one made with Rufus.
 
@@ -131,6 +137,9 @@ winpe-finish/              one-time boot fix-up used by Linux-built Windows To G
   give byte-identical `iaStorVD` files. Not yet tried on a real VMD laptop.
 - **Answer file:** generated for ISO, ISO with wipe, and WTG modes, and parsed as valid XML.
 - **Write ISO to USB (Linux):** partitioning, the copy with progress, the >4 GB split and the drive filter were tested on
-  a loop device and fake disk lists, and the drive picker in the GUI. Not yet tried on a real USB stick.
+  a loop device and fake disk lists, and the drive picker in the GUI. The exFAT layout was tested with a real
+  Win11Forge ISO on a 64 GB (MBR) and a 3 TB (GPT) loop disk: the drive booted in QEMU/OVMF with **Secure Boot on**
+  (Microsoft keys), Windows Setup found the unsplit 7.6 GB `install.wim` on the exFAT partition and started installing.
+  Not yet tried on a real USB stick.
 - **Write ISO to USB (Windows):** written but not yet run.
 - **Windows engine, both GUIs and Windows To Go on either OS:** written but **not yet run on real hardware**. Please try a first build in a VM (Hyper-V or VirtualBox, with EFI enabled) before using it on a laptop.

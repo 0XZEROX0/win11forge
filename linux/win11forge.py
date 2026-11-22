@@ -6,7 +6,7 @@ Win11Forge for Linux.
   Headless:   ./win11forge.sh --config build.json
   Editions:   ./win11forge.sh --list-editions Win11.iso
   USB stick:  sudo ./win11forge.sh --list-usb
-              sudo ./win11forge.sh --write-usb Win11-Forge.iso --disk /dev/sdX
+              sudo ./win11forge.sh --write-usb Win11-Forge.iso --disk /dev/sdX [--usb-format fat32]
 """
 import argparse
 import json
@@ -31,6 +31,9 @@ def cli():
     ap.add_argument("--list-usb", action="store_true", help="list the USB drives an ISO can be written to")
     ap.add_argument("--write-usb", metavar="ISO", help="erase a USB drive and make it a bootable installer from this ISO")
     ap.add_argument("--disk", help="the USB drive for --write-usb, e.g. /dev/sdb (see --list-usb)")
+    ap.add_argument("--usb-format", choices=["exfat", "fat32"], default="exfat",
+                    help="exfat (default): small FAT32 boot partition + exFAT partition for the rest, takes files "
+                         "over 4 GB; fat32: one FAT32 partition, install.wim split into .swm parts")
     ap.add_argument("--yes", action="store_true", help="do not ask before erasing the --disk")
     ap.add_argument("--progress-lines", action="store_true", help=argparse.SUPPRESS)  # used by the GUI
     a = ap.parse_args()
@@ -54,7 +57,7 @@ def cli():
         if a.progress_lines:
             eng.progress = lambda p: print(f"@progress {p}", flush=True)
         eng.log = lambda m: print(m, flush=True)
-        eng.write_usb(a.write_usb, a.disk)
+        eng.write_usb(a.write_usb, a.disk, layout=a.usb_format)
         return 0
     if a.list_editions:
         for e in eng.editions(a.list_editions):
@@ -524,11 +527,12 @@ def gui():
         rowf.pack(fill="x")
         cmb = ttk.Combobox(rowf, state="readonly", width=46)
         disks = []
-        need = Path(iso).stat().st_size + 64 * 1024 ** 2
+        fmt = tk.StringVar(value="exfat")
+        need_of = lambda: Path(iso).stat().st_size + (1300 if fmt.get() == "exfat" else 64) * 1024 ** 2
 
         def refresh():
             disks[:] = [x for x in eng.usb_disks()]
-            cmb["values"] = [x["label"] + ("" if x["size"] >= need else "   (too small)") for x in disks]
+            cmb["values"] = [x["label"] + ("" if x["size"] >= need_of() else "   (too small)") for x in disks]
             if disks:
                 cmb.current(0)
                 hint.configure(text="")
@@ -540,18 +544,25 @@ def gui():
         cmb.pack(side="left", fill="x", expand=True)
         hint = ttk.Label(fr, text="", style="Hint.TLabel", foreground=BAD)
         hint.pack(anchor="w", pady=(6, 0))
+        ttk.Label(fr, text="Format", style="Card.TLabel").pack(anchor="w", pady=(8, 2))
+        ttk.Radiobutton(fr, text="exFAT (recommended): the rest of the drive stays usable for your own files, "
+                                 "including files over 4 GB", variable=fmt, value="exfat", command=lambda: refresh()).pack(anchor="w")
+        ttk.Radiobutton(fr, text="FAT32 only: one partition, install.wim split into parts (for very old laptops)",
+                        variable=fmt, value="fat32", command=lambda: refresh()).pack(anchor="w")
+        ttk.Label(fr, text="exFAT puts a small FAT32 boot partition first, so it still boots with Secure Boot on.",
+                  style="Hint.TLabel", wraplength=px(440), justify="left").pack(anchor="w", pady=(2, 0))
         res = {"disk": None}
 
         def go():
             if cmb.current() < 0:
                 return
             dsk = disks[cmb.current()]
-            if dsk["size"] < need:
+            if dsk["size"] < need_of():
                 hint.configure(text="That drive is too small for this ISO.")
                 return
             if messagebox.askyesno("Win11Forge", f"Everything on\n\n    {dsk['label']}\n\nwill be erased. Continue?",
                                    icon="warning", parent=dlg):
-                res["disk"] = dsk
+                res["disk"] = dict(dsk, layout=fmt.get())
                 dlg.destroy()
         bf = ttk.Frame(fr, style="Card.TFrame")
         bf.pack(fill="x", pady=(14, 0))
@@ -592,15 +603,15 @@ def gui():
         def job():
             try:
                 if os.geteuid() == 0:
-                    eng.write_usb(iso, dsk["path"])
+                    eng.write_usb(iso, dsk["path"], layout=dsk["layout"])
                 else:
                     # Erasing a disk needs root: ask for the password with the desktop's polkit prompt.
                     if not shutil.which("pkexec"):
                         raise ForgeError("Writing a USB drive needs root. Restart Win11Forge with sudo, or run:\n"
                                          f"sudo {Path(__file__).resolve().parent.parent / 'win11forge.sh'} "
-                                         f"--write-usb '{iso}' --disk {dsk['path']}")
+                                         f"--write-usb '{iso}' --disk {dsk['path']} --usb-format {dsk['layout']}")
                     cmd = ["pkexec", sys.executable, str(Path(__file__).resolve()), "--write-usb", str(iso),
-                           "--disk", dsk["path"], "--yes", "--progress-lines"]
+                           "--disk", dsk["path"], "--usb-format", dsk["layout"], "--yes", "--progress-lines"]
                     logq.put("> " + " ".join(cmd[:2]) + " win11forge.py --write-usb ...")
                     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
                     for line in p.stdout:
