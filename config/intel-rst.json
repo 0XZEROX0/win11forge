@@ -1,0 +1,26 @@
+{
+  "_about": "Intel RST/VMD storage drivers added when IncludeIntelRst is on. Each package is Intel's official SetupRST.exe from downloadmirror.intel.com, checked against the SHA-256 Intel publishes on the download page. Only the F6 'Load driver' files (iaStorVD*.inf/.sys/.cat) are taken out of it; the installer is never run. To move to a newer Intel release, add or replace an entry here.",
+  "packages": [
+    {
+      "name": "12th to 15th Gen, Core Ultra Series 1 and 2",
+      "version": "20.4.0.1006",
+      "page": "https://www.intel.com/content/www/us/en/download/930427/intel-rapid-storage-technology-intel-rst-installation-for-12th-to-15th-gen-platforms.html",
+      "url": "https://downloadmirror.intel.com/930430/SetupRST.exe",
+      "sha256": "5372ac4d13983f80e662e3f76c3b5817ef31e268682bd1cdfdcb8c7d293d5218"
+    },
+    {
+      "name": "Core Ultra Series 3",
+      "version": "21.1.0.1006",
+      "page": "https://www.intel.com/content/www/us/en/download/920456/intel-rapid-storage-technology-driver-installation-software-for-intel-core-ultra-series-3-platforms.html",
+      "url": "https://downloadmirror.intel.com/920457/SetupRST.exe",
+      "sha256": "3fa94586855e094a61df036c92b611153c42c28fc6dd642cacd0f3b85634884b"
+    },
+    {
+      "name": "10th and 11th Gen",
+      "version": "18.7.6.1010",
+      "page": "https://www.intel.com/content/www/us/en/download/19512/intel-rapid-storage-technology-driver-installation-software-with-intel-optane-memory-10th-and-11th-gen-platforms.html",
+      "url": "https://downloadmirror.intel.com/773229/SetupRST.exe",
+      "sha256": "a2b2e20d6d8100e9ee344746f80849524c64490b90686a13c09268cadb976b37"
+    }
+  ]
+}

@@ -25,7 +25,7 @@ sudo ./win11forge.sh     # Windows To Go output (it writes to a disk)
 Then:
 1. **Pick the ISO.** Get it from <https://www.microsoft.com/software-download/windows11> (the window has a button for this). Then choose the edition. Pro is selected by default.
 2. **Debloat.** Choose which apps to remove and leave "Remove ads…" on.
-3. **Drivers.** Optional: add folders of extracted driver packs (see below).
+3. **Drivers.** *Add Intel RST/VMD storage driver* is ticked by default (see below). Optional: add folders of extracted driver packs.
 4. **First boot.** Set the user name, an optional password, language, keyboard and time zone.
 5. **Output.** Choose ISO or a USB disk, then press **Build**. A build takes about 20 to 40 minutes.
 6. **Burn to USB (optional).** When an ISO finishes, Win11Forge asks whether to write it to a USB drive. Say yes, pick the
@@ -65,8 +65,30 @@ Windows 11 already includes class drivers for HD Audio, USB webcams (UVC), I2C/H
 HID touchscreens, USB, NVMe and most Ethernet. The tool **does not disable Windows Update driver delivery**, and the first-logon script
 starts a driver scan, so the rest (Realtek/Conexant audio extras, IR cameras, card readers) install on their own once the laptop is online.
 
+### Intel RST / VMD storage driver (optional, on by default)
+
+Many Intel laptops ship with **VMD** turned on in the BIOS. Stock Windows Setup then shows "no drives found" until you
+load Intel's storage driver or turn VMD off. With **"Add Intel RST/VMD storage driver"** ticked (`"IncludeIntelRst": true`
+in `build.json`), Win11Forge adds it to Windows Setup and to the installed Windows, so the disk shows up with no BIOS change.
+
+- It downloads Intel's official `SetupRST.exe` from `downloadmirror.intel.com` and checks it against the SHA-256 Intel
+  publishes. Only the "F6 / Load driver" files (`iaStorVD*.inf/.sys/.cat`) are taken out; the installer is never run.
+- Versions included (listed in `config/intel-rst.json`):
+
+  | Driver | Laptops | Intel download page |
+  |---|---|---|
+  | 20.4.0.1006 | 12th to 15th Gen Core, Core Ultra Series 1 and 2 | [930427](https://www.intel.com/content/www/us/en/download/930427/intel-rapid-storage-technology-intel-rst-installation-for-12th-to-15th-gen-platforms.html) |
+  | 21.1.0.1006 | Core Ultra Series 3 | [920456](https://www.intel.com/content/www/us/en/download/920456/intel-rapid-storage-technology-driver-installation-software-for-intel-core-ultra-series-3-platforms.html) |
+  | 18.7.6.1010 | 10th and 11th Gen Core | [19512](https://www.intel.com/content/www/us/en/download/19512/intel-rapid-storage-technology-driver-installation-software-with-intel-optane-memory-10th-and-11th-gen-platforms.html) |
+
+- The download (~32 MB) is cached in the work folder. **Offline builds:** put the `SetupRST.exe` files from those pages in
+  `tools/intel-rst/` (any file name); they are used when their hash matches.
+- On laptops without VMD (or AMD laptops) the driver just isn't used, so leaving it on is harmless.
+- When Intel releases a newer version, update the entry in `config/intel-rst.json` (URL + SHA-256 from Intel's page).
+
+### Other driver packs
+
 For full **offline** support, put extracted driver packs (`.inf` files, not `.exe`) in one or more folders and add them under *Drivers*:
-- **Intel RST / VMD storage driver.** This one matters most. Without it many Intel laptops show "no drives found" in setup.
 - Wi-Fi drivers: Intel, Realtek, MediaTek, Qualcomm.
 - OEM driver packs: Dell "Driver Packs", HP "Driver Packs", Lenovo "SCCM packages". These are official, extracted, multi-model bundles.
 
@@ -97,7 +119,7 @@ modules/Forge.Core.psm1    Windows engine (DISM, reg.exe, bcdboot, oscdimg)
 win11forge.sh              Linux launcher
 linux/forge_engine.py      Linux engine (wimlib, hivex, 7-Zip, xorriso, parted)
 linux/win11forge.py        Linux GUI + CLI
-config/                    apps, registry tweaks, answer file template, generic setup keys (shared)
+config/                    apps, registry tweaks, answer file template, generic setup keys, Intel RST list (shared)
 scripts/firstlogon.ps1     runs once at first desktop: finishes debloat, keeps auto sign-in, driver scan
 winpe-finish/              one-time boot fix-up used by Linux-built Windows To Go drives
 ```
@@ -105,6 +127,8 @@ winpe-finish/              one-time boot fix-up used by Linux-built Windows To G
 ## Test status
 
 - **Linux ISO pipeline:** tested end to end on a synthetic Windows image. It extracts the edition, blocks apps through Deprovisioned keys, merges registry hives, stages drivers, writes a valid answer file and builds a BIOS+UEFI El Torito ISO. The camera app was kept as intended.
+- **Intel RST/VMD option:** download, SHA-256 check and extraction tested on Linux (Python) and in PowerShell 7; both
+  give byte-identical `iaStorVD` files. Not yet tried on a real VMD laptop.
 - **Answer file:** generated for ISO, ISO with wipe, and WTG modes, and parsed as valid XML.
 - **Write ISO to USB (Linux):** partitioning, the copy with progress, the >4 GB split and the drive filter were tested on
   a loop device and fake disk lists, and the drive picker in the GUI. Not yet tried on a real USB stick.

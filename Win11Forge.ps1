@@ -101,13 +101,15 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
               <Button Name="BtnDrivers" DockPanel.Dock="Right" Content="Browse..."/>
               <TextBox Name="TxtDrivers" ToolTip="Folder of extracted driver packs (.inf). Several folders: separate with ;"/>
             </DockPanel>
+            <CheckBox Name="ChkIntelRst" IsChecked="True" Content="Add Intel RST/VMD storage driver (downloaded from Intel)"
+              ToolTip="Lets Windows Setup see the disk on Intel laptops with VMD on, so you don't have to change the BIOS. Official Intel SetupRST.exe, checked against Intel's SHA-256."/>
             <CheckBox Name="ChkHostDrivers" Content="Also include all drivers from this PC"/>
             <DockPanel Margin="0,4,0,0">
               <Button Name="BtnUpdates" DockPanel.Dock="Right" Content="Browse..."/>
               <TextBox Name="TxtUpdates" ToolTip="Optional folder of .msu/.cab cumulative updates to slipstream"/>
             </DockPanel>
             <TextBlock TextWrapping="Wrap" Foreground="#5B6472" Margin="0,4,0,0"
-              Text="Windows already ships drivers for most touchpads, touchscreens, USB webcams and HD audio, and fetches the rest from Windows Update on first boot. Add Intel RST/VMD storage, Wi-Fi and OEM driver packs here so they work offline."/>
+              Text="Windows already ships drivers for most touchpads, touchscreens, USB webcams and HD audio, and fetches the rest from Windows Update on first boot. Add Wi-Fi and OEM driver packs here so they work offline."/>
           </StackPanel>
         </GroupBox>
         <GroupBox Header="4. First boot (no setup screens)">
@@ -250,6 +252,7 @@ function Get-Options {
         UseEsd         = [bool]$ui.ChkEsd.IsChecked
         DriverDirs     = @($ui.TxtDrivers.Text -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         IncludeHostDrivers = [bool]$ui.ChkHostDrivers.IsChecked
+        IncludeIntelRst = [bool]$ui.ChkIntelRst.IsChecked
         UpdatesDir     = $ui.TxtUpdates.Text
         UserName       = $ui.TxtUser.Text.Trim()
         Password       = $ui.TxtPass.Password

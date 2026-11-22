@@ -4,3 +4,4 @@ __pycache__/
 *.wim
 *.esd
 work/
+tools/intel-rst/

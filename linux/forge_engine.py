@@ -17,13 +17,18 @@ Differences from the Windows engine, by necessity:
     via a one-time mini Windows PE taken from the ISO. UEFI boot only.
 """
 import fnmatch
+import hashlib
+import io
 import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
+import urllib.request
+import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -85,6 +90,39 @@ def quiet_run(args):
 def load_json(name):
     with open(CONFIG / name, encoding="utf-8") as f:
         return json.load(f)
+
+
+def carve_zips(data):
+    """Yield every complete zip archive embedded in a binary (found from its end-of-central-directory record)."""
+    for m in re.finditer(rb"PK\x05\x06", data):
+        e = m.start()
+        if e + 22 > len(data):
+            continue
+        cd_size, cd_off = struct.unpack("<II", data[e + 12:e + 20])
+        clen = struct.unpack("<H", data[e + 20:e + 22])[0]
+        start = e - cd_size - cd_off
+        if start < 0 or data[start:start + 4] != b"PK\x03\x04":
+            continue
+        try:
+            yield zipfile.ZipFile(io.BytesIO(data[start:e + 22 + clen]))
+        except zipfile.BadZipFile:
+            continue
+
+
+def extract_intel_rst(exe_bytes, dest):
+    """Write the F6 VMD driver files (iaStorVD*.inf/.sys/.cat) from an Intel SetupRST.exe into dest.
+    Returns the number of files written."""
+    dest = Path(dest)
+    n = 0
+    for z in carve_zips(exe_bytes):
+        names = [i for i in z.namelist() if re.fullmatch(r"(?i)iaStorVD\w*\.(inf|sys|cat)", Path(i).name)]
+        if not any(x.lower().endswith(".inf") for x in names):
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (dest / Path(name).name).write_bytes(z.read(name))
+            n += 1
+    return n
 
 
 class Engine:
@@ -333,6 +371,49 @@ class Engine:
         out = self.run(["lsblk", "-lnpo", "NAME,TYPE", dev], capture=True, quiet=True)
         return [l.split()[0] for l in out.splitlines() if l.split()[1:] == ["part"]]
 
+    # ------------------------------------------------------------------ Intel RST / VMD
+    def intel_rst(self, work):
+        """Download (or reuse) Intel's official RST installers listed in config/intel-rst.json, check their
+        SHA-256 and extract the VMD storage driver. Returns the driver folders."""
+        pkgs = load_json("intel-rst.json")["packages"]
+        local = [p for p in (ROOT / "tools" / "intel-rst").glob("*.exe")] if (ROOT / "tools" / "intel-rst").is_dir() else []
+        cache = work / "intel-rst"
+        out = []
+        for p in pkgs:
+            ver = p["version"]
+            dest = cache / ver / "driver"
+            if dest.is_dir() and any(dest.glob("*.inf")):
+                self.log(f"  Intel RST/VMD {ver} ({p['name']}): cached")
+                out.append(dest)
+                continue
+            data = None
+            for f in local:
+                b = f.read_bytes()
+                if hashlib.sha256(b).hexdigest() == p["sha256"]:
+                    self.log(f"  Intel RST/VMD {ver}: using {f}")
+                    data = b
+                    break
+            if data is None:
+                self.log(f"  downloading Intel RST/VMD {ver} ({p['name']}) from {p['url']}")
+                try:
+                    req = urllib.request.Request(p["url"], headers={"User-Agent": "Mozilla/5.0 (Win11Forge)"})
+                    with urllib.request.urlopen(req, timeout=120) as r:
+                        data = r.read()
+                except OSError as e:
+                    raise ForgeError(f"Could not download the Intel RST/VMD driver {ver}: {e}\n"
+                                     f"Download SetupRST.exe from {p['page']} into tools/intel-rst/, or untick the Intel RST/VMD option.")
+                got = hashlib.sha256(data).hexdigest()
+                if got != p["sha256"]:
+                    raise ForgeError(f"Intel RST/VMD {ver}: SHA-256 mismatch (got {got}, Intel lists {p['sha256']}). Not using it.")
+            if dest.exists():
+                shutil.rmtree(dest)
+            n = extract_intel_rst(data, dest)
+            if n == 0:
+                raise ForgeError(f"Intel RST/VMD {ver}: no iaStorVD driver found inside SetupRST.exe.")
+            self.log(f"  Intel RST/VMD {ver}: {n} file(s) extracted")
+            out.append(dest)
+        return out
+
     # ------------------------------------------------------------------ build
     def build(self, o):
         o = dict(o)
@@ -408,6 +489,8 @@ class Engine:
             "DisableHibernate": o["Mode"] == "WTG", "AppPatterns": o.get("RemoveApps") or []}, indent=1), encoding="utf-8")
         cmds.append(f"add {q(sc)} \"/Windows/Setup/Scripts\"")
         drivers = [d for d in (o.get("DriverDirs") or []) if d and Path(d).is_dir()]
+        if o.get("IncludeIntelRst"):
+            drivers += [str(d) for d in self.intel_rst(work)]
         for i, d in enumerate(drivers):
             n = len(list(Path(d).rglob("*.inf")))
             if n == 0:
