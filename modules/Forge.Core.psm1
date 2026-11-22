@@ -375,7 +375,85 @@ function Get-ForgeDriverDirs {
         }
         $dirs += $hostDir
     }
+    if ($Options['IncludeIntelRst']) { $dirs += @(Get-ForgeIntelRst -WorkDir $WorkDir) }
     return $dirs
+}
+
+function Get-ForgeIntelRst {
+    <#
+      Intel RST/VMD storage driver for Windows Setup. Downloads Intel's official SetupRST.exe packages listed in
+      config\intel-rst.json (or uses copies in tools\intel-rst), checks the SHA-256 Intel publishes, and takes the
+      F6 "Load driver" files (iaStorVD*.inf/.sys/.cat) out of the zip archives embedded in it. The installer is
+      never run. Returns the driver folders.
+    #>
+    param([string]$WorkDir)
+    $pkgs  = (Get-ForgeConfig 'intel-rst.json').packages
+    $local = @()
+    $localDir = Join-Path $script:ModuleRoot 'tools\intel-rst'
+    if (Test-Path $localDir) { $local = @(Get-ChildItem -Path $localDir -Filter *.exe -File) }
+    Add-Type -AssemblyName System.IO.Compression
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $out = @()
+    foreach ($p in $pkgs) {
+        $dest = Join-Path $WorkDir "intel-rst\$($p.version)\driver"
+        if ((Test-Path $dest) -and @(Get-ChildItem $dest -Filter *.inf).Count) {
+            Write-ForgeLog "  Intel RST/VMD $($p.version) ($($p.name)): cached"
+            $out += $dest; continue
+        }
+        $bytes = $null
+        foreach ($f in $local) {
+            $b = [IO.File]::ReadAllBytes($f.FullName)
+            if ((-join ($sha.ComputeHash($b) | ForEach-Object { $_.ToString('x2') })) -eq $p.sha256) {
+                Write-ForgeLog "  Intel RST/VMD $($p.version): using $($f.FullName)"
+                $bytes = $b; break
+            }
+        }
+        if (-not $bytes) {
+            Write-ForgeLog "  downloading Intel RST/VMD $($p.version) ($($p.name)) from $($p.url)"
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+                $wc = New-Object Net.WebClient
+                $wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Win11Forge)')
+                $bytes = $wc.DownloadData($p.url)
+            } catch {
+                throw "Could not download the Intel RST/VMD driver $($p.version): $($_.Exception.Message)`nDownload SetupRST.exe from $($p.page) into tools\intel-rst\, or untick the Intel RST/VMD option."
+            }
+            $got = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+            if ($got -ne $p.sha256) { throw "Intel RST/VMD $($p.version): SHA-256 mismatch (got $got, Intel lists $($p.sha256)). Not using it." }
+        }
+        if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+        # Find each embedded zip from its end-of-central-directory record. Latin-1 maps bytes 1:1 to chars.
+        $text = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
+        $eocd = 'PK' + [char]5 + [char]6
+        $n = 0; $pos = 0
+        while (($e = $text.IndexOf($eocd, $pos, [StringComparison]::Ordinal)) -ge 0) {
+            $pos = $e + 4
+            if ($e + 22 -gt $bytes.Length) { continue }
+            $cdSize = [BitConverter]::ToUInt32($bytes, $e + 12)
+            $cdOff  = [BitConverter]::ToUInt32($bytes, $e + 16)
+            $clen   = [BitConverter]::ToUInt16($bytes, $e + 20)
+            $start  = [int64]$e - $cdSize - $cdOff
+            if ($start -lt 0 -or $text.Substring([int]$start, 4) -ne ('PK' + [char]3 + [char]4)) { continue }
+            try {
+                $ms  = [IO.MemoryStream]::new($bytes, [int]$start, [int]($e + 22 + $clen - $start), $false)
+                $zip = [IO.Compression.ZipArchive]::new($ms, [IO.Compression.ZipArchiveMode]::Read)
+            } catch { continue }
+            $want = @($zip.Entries | Where-Object { $_.Name -match '^iaStorVD\w*\.(inf|sys|cat)$' })
+            if (@($want | Where-Object { $_.Name -like '*.inf' }).Count) {
+                New-Item -ItemType Directory -Path $dest -Force | Out-Null
+                foreach ($w in $want) {
+                    $src = $w.Open(); $dst = [IO.File]::Create((Join-Path $dest $w.Name))
+                    try { $src.CopyTo($dst) } finally { $dst.Dispose(); $src.Dispose() }
+                    $n++
+                }
+            }
+            $zip.Dispose()
+        }
+        if ($n -eq 0) { throw "Intel RST/VMD $($p.version): no iaStorVD driver found inside SetupRST.exe." }
+        Write-ForgeLog "  Intel RST/VMD $($p.version): $n file(s) extracted"
+        $out += $dest
+    }
+    return $out
 }
 
 function Clear-ForgeStaleMounts {
@@ -588,7 +666,7 @@ function Invoke-ForgeBuild {
       Options:
         IsoPath, ImageIndex, Mode ('ISO'|'WTG'), WorkDir,
         RemoveApps (string[] patterns), RemoveAds, CleanupImage, UseEsd,
-        DriverDirs (string[]), IncludeHostDrivers, UpdatesDir,
+        DriverDirs (string[]), IncludeHostDrivers, IncludeIntelRst, UpdatesDir,
         UserName, Password, ComputerName, Locale, Keyboard, TimeZone, AutoLogon, BypassHardware,
         ISO:  OutputIso, WipeDisk0
         WTG:  DiskNumber, CompactOS, PortableMode

@@ -157,7 +157,7 @@ def gui():
         "out": str(Path.home() / "Win11-Forge.iso"), "work": str(Path.home() / "win11forge-work"),
         "mode": "ISO", "usb": ""}.items()}
     b = {k: tk.BooleanVar(value=val) for k, val in {
-        "ads": True, "autologon": True, "bypass": True, "esd": False, "wipe": False, "portable": False}.items()}
+        "ads": True, "rst": True, "autologon": True, "bypass": True, "esd": False, "wipe": False, "portable": False}.items()}
     state = {"editions": [], "disks": [], "busy": None, "job": None, "t0": 0.0, "step": 0, "steps": 6}
 
     # ---------------------------------------------------------------- header
@@ -321,8 +321,11 @@ def gui():
 
     # 3. drivers
     g = card("3  Drivers", "Windows already has drivers for most touchpads, touchscreens, webcams and audio, and gets "
-                           "the rest from Windows Update. Add extracted Intel RST/VMD, Wi-Fi and OEM driver packs "
-                           "(.inf) here. Pick more than one folder to add them all.")
+                           "the rest from Windows Update. Add extracted Wi-Fi and OEM driver packs (.inf) here. "
+                           "Pick more than one folder to add them all.")
+    ttk.Checkbutton(g, text="Add Intel RST/VMD storage driver (downloaded from Intel)", variable=b["rst"]).pack(anchor="w")
+    ttk.Label(g, text="Lets Windows Setup see the disk on Intel laptops with VMD on, so you don't have to change the BIOS.",
+              style="Hint.TLabel", wraplength=px(500), justify="left").pack(anchor="w", pady=(0, 4))
     row(g, "Driver folders", v["drivers"],
         lambda: v["drivers"].set(";".join(x for x in [v["drivers"].get(), filedialog.askdirectory()] if x)), browse_text="Add")
 
@@ -451,6 +454,7 @@ def gui():
         o = {
             "IsoPath": v["iso"].get(), "Mode": v["mode"].get(), "WorkDir": v["work"].get(),
             "RemoveApps": [m for m, var in apps if var.get()], "RemoveAds": b["ads"].get(), "UseEsd": b["esd"].get(),
+            "IncludeIntelRst": b["rst"].get(),
             "DriverDirs": [x.strip() for x in v["drivers"].get().split(";") if x.strip()],
             "UserName": v["user"].get().strip(), "Password": v["pass"].get(), "ComputerName": v["pc"].get().strip(),
             "Locale": v["locale"].get().strip(), "Keyboard": v["kbd"].get().strip(), "TimeZone": v["tz"].get().strip(),
