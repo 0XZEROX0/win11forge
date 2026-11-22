@@ -11,7 +11,7 @@
         Get-ForgeUsbDisks
         New-ForgeUnattend      -Options <hashtable>      (returns XML text)
         Invoke-ForgeBuild      -Options <hashtable>      (does the whole job)
-        Write-ForgeIsoToUsb    -IsoPath <iso> -DiskNumber <n>   (bootable USB installer)
+        Write-ForgeIsoToUsb    -IsoPath <iso> -DiskNumber <n> [-Layout exFAT|FAT32]   (bootable USB installer)
         Set-ForgeLogger        -Logger <scriptblock>
 #>
 
@@ -578,12 +578,18 @@ function New-ForgeWindowsToGo {
 function Write-ForgeIsoToUsb {
     <#
       Erases a USB drive and makes it a bootable Windows installer from an ISO.
-      One FAT32 partition on MBR with the ISO's files: boots on UEFI (Secure Boot on) and, thanks to
-      bootsect, on legacy BIOS. A >4 GB install image is split into install.swm parts for FAT32.
+      -Layout exFAT (default): a small FAT32 boot partition (boot files + sources\boot.wim) and an exFAT
+        partition with the whole ISO, install.wim unsplit, filling the rest of the drive (takes files over
+        4 GB). The firmware boots Microsoft's signed bootloader from FAT32, so Secure Boot stays on; Windows
+        Setup then finds sources\install.wim on the exFAT partition by itself.
+      -Layout FAT32: one FAT32 partition with the ISO's files; a >4 GB install image is split into
+        install.swm parts.
+      MBR (GPT on drives over 2 TB). bootsect adds legacy BIOS boot on MBR.
     #>
     param(
         [Parameter(Mandatory)][string]$IsoPath,
         [Parameter(Mandatory)][int]$DiskNumber,
+        [ValidateSet('exFAT', 'FAT32')][string]$Layout = 'exFAT',
         [switch]$AllowNonUsb
     )
     if (-not (Test-ForgeAdmin)) { throw "Run Win11Forge as Administrator." }
@@ -596,65 +602,117 @@ function Write-ForgeIsoToUsb {
     $isoPart = $null
     try { $isoPart = Get-Partition -DriveLetter ($iso.Substring(0, 1)) -ErrorAction Stop } catch {}
     if ($isoPart -and $isoPart.DiskNumber -eq $n) { throw "The ISO is stored on disk $n itself. Copy it somewhere else first." }
-    $isoSize = (Get-Item $iso).Length
-    if ($disk.Size -lt ($isoSize + 64MB)) {
-        throw ("Disk {0} is too small ({1:N1} GB) for this ISO ({2:N1} GB)." -f $n, ($disk.Size / 1GB), ($isoSize / 1GB))
-    }
+    $exfat = $Layout -eq 'exFAT'
     $sw = [Diagnostics.Stopwatch]::StartNew()
 
-    Write-ForgeLog ("Step 1/3  Erasing disk {0}: {1} ({2:N0} GB)" -f $n, $disk.FriendlyName, ($disk.Size / 1GB))
-    if ($disk.IsOffline)  { Set-Disk -Number $n -IsOffline $false }
-    if ($disk.IsReadOnly) { Set-Disk -Number $n -IsReadOnly $false }
-    if ($disk.PartitionStyle -ne 'RAW') { Clear-Disk -Number $n -RemoveData -RemoveOEM -Confirm:$false }
-    Initialize-Disk -Number $n -PartitionStyle MBR
-    # Windows will not format FAT32 bigger than 32 GB; a Windows installer needs far less than that.
-    $free = [uint64](Get-Disk -Number $n).LargestFreeExtent
-    $size = [math]::Min($free, [uint64]32000MB)
-    $part = New-Partition -DiskNumber $n -Size $size -IsActive -AssignDriveLetter
-    Format-Volume -Partition $part -FileSystem FAT32 -NewFileSystemLabel 'WIN11FORGE' -Confirm:$false | Out-Null
-    $part = Get-Partition -DiskNumber $n -PartitionNumber $part.PartitionNumber
-    if (-not $part.DriveLetter) { throw "Windows did not give the new USB partition a drive letter." }
-    $U = "$($part.DriveLetter):"
-
     try {
-        Write-ForgeLog "Step 2/3  Copying Windows installer files to $U"
         $root = Mount-ForgeSource -IsoPath $iso
-        Invoke-ForgeNative -FilePath "$env:SystemRoot\System32\robocopy.exe" `
-            -ArgumentList @("$root\", "$U\", '/E', '/XF', 'install.wim', 'install.esd', '/A-:R', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:2', '/W:2') `
-            -OkCodes @(0, 1, 2, 3, 4, 5, 6, 7) | Out-Null
-        $img = $null
-        foreach ($x in 'install.wim', 'install.esd') { if (Test-Path "$root\sources\$x") { $img = Get-Item "$root\sources\$x"; break } }
-        if ($img) {
-            if ($img.Length -lt 4GB) {
-                Write-ForgeLog ("Copying {0} ({1:N1} GB)" -f $img.Name, ($img.Length / 1GB))
-                Copy-Item -Path $img.FullName -Destination "$U\sources\$($img.Name)" -Force
-            } else {
-                Write-ForgeLog "$($img.Name) is over 4 GB, splitting it into install.swm parts for FAT32"
-                $wim = $img.FullName
-                $tmp = $null
-                if ($img.Extension -eq '.esd') {  # .esd cannot be split directly
-                    $tmp = Join-Path $env:TEMP 'forge-usb-install.wim'
-                    if (Test-Path $tmp) { Remove-Item $tmp -Force }
-                    Invoke-ForgeNative -FilePath "$env:SystemRoot\System32\dism.exe" -ArgumentList @('/Export-Image', "/SourceImageFile:$wim", '/SourceIndex:1', "/DestinationImageFile:$tmp", '/Compress:max') | Out-Null
-                    $wim = $tmp
+        $files = @(Get-ChildItem -LiteralPath "$root\" -Recurse -File -Force)
+        $total = [uint64]0; foreach ($f in $files) { $total += $f.Length }
+        # Boot partition of the exFAT layout: everything outside \sources plus \sources\boot.wim.
+        $bootBytes = [uint64]0
+        foreach ($f in $files) {
+            $rel = $f.FullName.Substring($root.Length).TrimStart('\')
+            if ($rel -notlike 'sources\*' -or $rel -eq 'sources\boot.wim') { $bootBytes += $f.Length }
+        }
+        $bootMB = [uint64][math]::Max(1024, [math]::Ceiling($bootBytes * 1.1 / 1MB) + 128)
+        $need = if ($exfat) { $total + ($bootMB + 66) * 1MB } else { $total + 64MB }
+        if ($disk.Size -lt $need) {
+            throw ("Disk {0} is too small ({1:N1} GB) for this ISO (needs {2:N1} GB)." -f $n, ($disk.Size / 1GB), ($need / 1GB))
+        }
+
+        Write-ForgeLog ("Step 1/3  Erasing disk {0}: {1} ({2:N0} GB), {3} layout" -f $n, $disk.FriendlyName, ($disk.Size / 1GB), $Layout)
+        if ($disk.IsOffline)  { Set-Disk -Number $n -IsOffline $false }
+        if ($disk.IsReadOnly) { Set-Disk -Number $n -IsReadOnly $false }
+        if ($disk.PartitionStyle -ne 'RAW') { Clear-Disk -Number $n -RemoveData -RemoveOEM -Confirm:$false }
+        $gpt = $exfat -and $disk.Size -ge 2TB  # MBR cannot address past 2 TiB
+        Initialize-Disk -Number $n -PartitionStyle $(if ($gpt) { 'GPT' } else { 'MBR' })
+        if ($exfat) {
+            $bootP = if ($gpt) { New-Partition -DiskNumber $n -Size ($bootMB * 1MB) -AssignDriveLetter }
+                     else      { New-Partition -DiskNumber $n -Size ($bootMB * 1MB) -IsActive -AssignDriveLetter }
+            Format-Volume -Partition $bootP -FileSystem FAT32 -NewFileSystemLabel 'FORGEBOOT' -Confirm:$false | Out-Null
+            $dataP = New-Partition -DiskNumber $n -UseMaximumSize -AssignDriveLetter
+            Format-Volume -Partition $dataP -FileSystem exFAT -NewFileSystemLabel 'WIN11FORGE' -Confirm:$false | Out-Null
+            $dataP = Get-Partition -DiskNumber $n -PartitionNumber $dataP.PartitionNumber
+            if (-not $dataP.DriveLetter) { throw "Windows did not give the exFAT partition a drive letter." }
+            $D = "$($dataP.DriveLetter):"
+        } else {
+            # Windows will not format FAT32 bigger than 32 GB; a Windows installer needs far less than that.
+            $free = [uint64](Get-Disk -Number $n).LargestFreeExtent
+            $bootP = New-Partition -DiskNumber $n -Size ([math]::Min($free, [uint64]32000MB)) -IsActive -AssignDriveLetter
+            Format-Volume -Partition $bootP -FileSystem FAT32 -NewFileSystemLabel 'WIN11FORGE' -Confirm:$false | Out-Null
+        }
+        $bootP = Get-Partition -DiskNumber $n -PartitionNumber $bootP.PartitionNumber
+        if (-not $bootP.DriveLetter) { throw "Windows did not give the new USB partition a drive letter." }
+        $U = "$($bootP.DriveLetter):"
+
+        $rc = "$env:SystemRoot\System32\robocopy.exe"
+        $rcOpts = @('/A-:R', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:2', '/W:2')
+        $rcOk = @(0, 1, 2, 3, 4, 5, 6, 7)
+        if ($exfat) {
+            Write-ForgeLog "Step 2/3  Copying boot files to $U (FAT32)"
+            Invoke-ForgeNative -FilePath $rc -ArgumentList (@("$root\", "$U\", '/E', '/XD', "$root\sources") + $rcOpts) -OkCodes $rcOk | Out-Null
+            New-Item -ItemType Directory -Path "$U\sources" -Force | Out-Null
+            Copy-Item -LiteralPath "$root\sources\boot.wim" -Destination "$U\sources\boot.wim" -Force
+            Write-ForgeLog ("Copying the whole installer ({0:N1} GB) to {1} (exFAT, install.wim not split)" -f ($total / 1GB), $D)
+            # A Win11Forge ISO stores a big image as install.swm parts (ISO9660 4 GB limit); exFAT does not need
+            # them, so they are joined back into one sources\install.wim.
+            $swm = @(Get-ChildItem -LiteralPath "$root\sources" -Filter 'install*.swm' -File -ErrorAction SilentlyContinue)
+            Invoke-ForgeNative -FilePath $rc -ArgumentList (@("$root\", "$D\", '/E', '/XF', 'install*.swm') + $rcOpts) -OkCodes $rcOk | Out-Null
+            if ($swm.Count) {
+                Write-ForgeLog "Joining $($swm.Count) install.swm parts back into one install.wim"
+                $idx = @(1)
+                try { $idx = @(Get-WindowsImage -ImagePath "$root\sources\install.swm" -ErrorAction Stop | ForEach-Object { $_.ImageIndex }) } catch {}
+                foreach ($i in $idx) {
+                    Invoke-ForgeNative -FilePath "$env:SystemRoot\System32\dism.exe" -ArgumentList @('/Export-Image',
+                        "/SourceImageFile:$root\sources\install.swm", "/SWMFile:$root\sources\install*.swm", "/SourceIndex:$i",
+                        "/DestinationImageFile:$D\sources\install.wim", '/Compress:max', '/CheckIntegrity') | Out-Null
                 }
-                Invoke-ForgeNative -FilePath "$env:SystemRoot\System32\dism.exe" -ArgumentList @('/Split-Image', "/ImageFile:$wim", "/SWMFile:$U\sources\install.swm", '/FileSize:3800') | Out-Null
-                if ($tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+            }
+        } else {
+            Write-ForgeLog "Step 2/3  Copying Windows installer files to $U"
+            Invoke-ForgeNative -FilePath $rc -ArgumentList (@("$root\", "$U\", '/E', '/XF', 'install.wim', 'install.esd') + $rcOpts) -OkCodes $rcOk | Out-Null
+            $img = $null
+            foreach ($x in 'install.wim', 'install.esd') { if (Test-Path "$root\sources\$x") { $img = Get-Item "$root\sources\$x"; break } }
+            if ($img) {
+                if ($img.Length -lt 4GB) {
+                    Write-ForgeLog ("Copying {0} ({1:N1} GB)" -f $img.Name, ($img.Length / 1GB))
+                    Copy-Item -Path $img.FullName -Destination "$U\sources\$($img.Name)" -Force
+                } else {
+                    Write-ForgeLog "$($img.Name) is over 4 GB, splitting it into install.swm parts for FAT32"
+                    $wim = $img.FullName
+                    $tmp = $null
+                    if ($img.Extension -eq '.esd') {  # .esd cannot be split directly
+                        $tmp = Join-Path $env:TEMP 'forge-usb-install.wim'
+                        if (Test-Path $tmp) { Remove-Item $tmp -Force }
+                        Invoke-ForgeNative -FilePath "$env:SystemRoot\System32\dism.exe" -ArgumentList @('/Export-Image', "/SourceImageFile:$wim", '/SourceIndex:1', "/DestinationImageFile:$tmp", '/Compress:max') | Out-Null
+                        $wim = $tmp
+                    }
+                    Invoke-ForgeNative -FilePath "$env:SystemRoot\System32\dism.exe" -ArgumentList @('/Split-Image', "/ImageFile:$wim", "/SWMFile:$U\sources\install.swm", '/FileSize:3800') | Out-Null
+                    if ($tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+                }
             }
         }
-        # Legacy BIOS boot code (UEFI boots from \efi\boot\bootx64.efi without it)
+        # Legacy BIOS boot code on MBR (UEFI boots from \efi\boot\bootx64.efi without it)
         $bootsect = "$root\boot\bootsect.exe"
-        if (Test-Path $bootsect) {
+        if (-not $gpt -and (Test-Path $bootsect)) {
             try { Invoke-ForgeNative -FilePath $bootsect -ArgumentList @('/nt60', $U, '/force', '/mbr') | Out-Null }
-            catch { Write-ForgeLog "  (bootsect failed; the stick still boots on UEFI laptops)" }
+            catch { Write-ForgeLog "  (bootsect failed; the drive still boots on UEFI laptops)" }
         }
     } finally {
         Dismount-ForgeSource -IsoPath $iso
     }
 
     Write-ForgeLog "Step 3/3  Flushing data to the drive (do not unplug)"
-    try { Write-VolumeCache -DriveLetter $part.DriveLetter } catch {}
-    Write-ForgeLog "USB drive is ready: $U (disk $n). Boot the laptop from it (F12 / F9 / Esc boot menu)."
+    try { Write-VolumeCache -DriveLetter $bootP.DriveLetter } catch {}
+    if ($exfat) {
+        try { Write-VolumeCache -DriveLetter $dataP.DriveLetter } catch {}
+        $freeGB = ((Get-Volume -DriveLetter $dataP.DriveLetter).SizeRemaining / 1GB)
+        Write-ForgeLog ("USB drive is ready (disk {0}). {1} (WIN11FORGE, exFAT) has {2:N0} GB free for your own files, including files over 4 GB." -f $n, $D, $freeGB)
+    } else {
+        Write-ForgeLog "USB drive is ready: $U (disk $n)."
+    }
+    Write-ForgeLog "Boot the laptop from it (F12 / F9 / Esc boot menu)."
     Write-ForgeLog ("Done in {0:N0} minutes." -f $sw.Elapsed.TotalMinutes)
 }
 

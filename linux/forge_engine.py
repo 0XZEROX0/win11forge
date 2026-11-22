@@ -36,9 +36,10 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "config"
 
 TOOLS_ISO = ["wimlib-imagex", "hivexregedit", "xorriso", "7z"]
-TOOLS_USB = ["parted", "mkfs.vfat", "lsblk", "wipefs", "mount", "umount", "findmnt"]
+TOOLS_USB = ["parted", "mkfs.vfat", "wimlib-imagex", "lsblk", "wipefs", "mount", "umount", "findmnt"]
 SYSTEM_MOUNTS = {"/", "/boot", "/boot/efi", "/efi", "/home", "/usr", "/var", "/opt", "/srv", "[SWAP]"}
 FAT32_MAX = 4 * 1024 ** 3 - 1
+USB_LAYOUTS = ("exfat", "fat32")  # write_usb: FAT32 boot + exFAT data (default), or one FAT32 partition
 TOOLS_WTG = ["wimlib-imagex", "hivexregedit", "xorriso", "7z", "parted", "mkfs.vfat", "mkfs.ntfs", "lsblk", "wipefs", "mount", "umount"]
 SPLIT_LIMIT = 4000 * 1024 * 1024
 HIVE_PREFIX = {"SOFT": r"HKEY_LOCAL_MACHINE\SOFTWARE", "SYS": r"HKEY_LOCAL_MACHINE\SYSTEM", "USER": r"HKEY_CURRENT_USER"}
@@ -63,9 +64,9 @@ LCID_KEYBOARDS = {"en-US": "0409:00000409", "en-GB": "0809:00000809", "ar-SA": "
                   "fr-FR": "040c:0000040c", "de-DE": "0407:00000407", "es-ES": "0c0a:0000040a", "tr-TR": "041f:0000041f"}
 
 
-INSTALL_HINT = ("Debian/Ubuntu: sudo apt install wimtools libwin-hivex-perl xorriso p7zip-full parted dosfstools ntfs-3g\n"
-                "Fedora:        sudo dnf install wimlib-utils hivex xorriso p7zip p7zip-plugins parted dosfstools ntfs-3g\n"
-                "Arch:          sudo pacman -S wimlib hivex libisoburn 7zip parted dosfstools ntfs-3g")
+INSTALL_HINT = ("Debian/Ubuntu: sudo apt install wimtools libwin-hivex-perl xorriso p7zip-full parted dosfstools exfatprogs ntfs-3g\n"
+                "Fedora:        sudo dnf install wimlib-utils hivex xorriso p7zip p7zip-plugins parted dosfstools exfatprogs ntfs-3g\n"
+                "Arch:          sudo pacman -S wimlib hivex libisoburn 7zip parted dosfstools exfatprogs ntfs-3g")
 
 
 class ForgeError(Exception):
@@ -634,16 +635,24 @@ class Engine:
 
 
     # ------------------------------------------------------------------ write a finished ISO to a USB stick
-    def write_usb(self, iso, dev, allow_non_usb=False):
+    def write_usb(self, iso, dev, allow_non_usb=False, layout="exfat"):
         """Erase a USB drive and turn it into a bootable Windows installer from a Windows ISO.
 
-        One FAT32 partition on MBR, the ISO's files copied onto it. That boots on every UEFI laptop,
-        with Secure Boot on. (Plain `dd` of a Windows ISO does not boot from USB.) A >4 GB install.wim
-        is split into install.swm parts so it fits on FAT32; Windows Setup reads those directly."""
+        layout="exfat" (default): a small FAT32 boot partition (UEFI boot files + sources/boot.wim) and an
+        exFAT partition with the whole ISO, install.wim unsplit, that fills the rest of the drive and takes
+        files over 4 GB. The firmware boots Microsoft's own signed bootloader from FAT32, so Secure Boot
+        stays on; Windows Setup then finds sources/install.wim on the exFAT partition by itself.
+
+        layout="fat32": one FAT32 partition with the ISO's files, a >4 GB install.wim split into
+        install.swm parts. The classic layout, for old firmware or when only one partition is wanted.
+        (Plain `dd` of a Windows ISO does not boot from USB.)"""
+        layout = (layout or "exfat").lower()
+        if layout not in USB_LAYOUTS:
+            raise ForgeError(f"Unknown USB format '{layout}'. Use one of: {', '.join(USB_LAYOUTS)}.")
         iso = Path(iso).expanduser().resolve()
         if not iso.is_file():
             raise ForgeError(f"ISO not found: {iso}")
-        miss = self.missing_tools("USB")
+        miss = self.missing_tools("USB") + (["mkfs.exfat"] if layout == "exfat" and not shutil.which("mkfs.exfat") else [])
         if miss:
             raise ForgeError("Missing tools: " + ", ".join(miss) + "\n" + INSTALL_HINT)
         if os.geteuid() != 0:
@@ -654,95 +663,154 @@ class Engine:
         if self.disk_of(iso) == dev:
             raise ForgeError(f"The ISO is stored on {dev} itself. Copy it somewhere else first.")
         size = info[dev]["size"] if dev in info else int(self.run(["lsblk", "-bdno", "SIZE", dev], capture=True, quiet=True).strip() or 0)
-        need = iso.stat().st_size + 64 * 1024 ** 2
-        if size and size < need:
-            raise ForgeError(f"{dev} is too small ({size / 1e9:.1f} GB) for this ISO ({need / 1e9:.1f} GB).")
 
         t0 = time.time()
-        self.log("Step 1/3  Erasing and partitioning " + dev)
-        for line in self.run(["lsblk", "-lnpo", "NAME,MOUNTPOINT", dev], capture=True, quiet=True).splitlines():
-            parts = line.split(None, 1)
-            if len(parts) == 2 and parts[1].strip():
-                self.run(["umount", parts[0]], ok=(0, 32))
-        self.run(["wipefs", "-a", dev])
-        self.run(["parted", "-s", dev, "mklabel", "msdos", "mkpart", "primary", "fat32", "1MiB", "100%",
-                  "set", "1", "boot", "on", "set", "1", "lba", "on"])
-        quiet_run(["partprobe", dev])
-        quiet_run(["udevadm", "settle"])
-        part = None
-        for _ in range(20):
-            parts = self.partitions(dev)
-            if parts and Path(parts[0]).exists():
-                part = parts[0]
-                break
-            time.sleep(0.5)
-        if not part:
-            raise ForgeError("The new partition did not appear after partitioning.")
-        self.run(["mkfs.vfat", "-F", "32", "-n", "WIN11FORGE", part])
-
-        self.log("Step 2/3  Copying Windows installer files")
-        dst = Path(tempfile.mkdtemp(prefix="forge-usb-"))
         src = Path(tempfile.mkdtemp(prefix="forge-iso-"))
-        iso_mounted = usb_mounted = False
+        mnts = []  # mounted paths, unmounted in reverse order
         try:
-            self.run(["mount", "-o", "flush", part, dst])
-            usb_mounted = True
-            try:
-                self.run(["mount", "-o", "loop,ro", iso, src], quiet=True)
-                iso_mounted = True
-                if not (src / "sources").is_dir():  # the ISO9660 view of a UDF-only image: just a README
-                    self.run(["umount", src], quiet=True)
-                    iso_mounted = False
-                    self.run(["mount", "-t", "udf", "-o", "loop,ro", iso, src], quiet=True)
-                    iso_mounted = True
-            except ForgeError:
-                iso_mounted = False
-            if iso_mounted and (src / "sources").is_dir():
-                self.copy_tree_progress(src, dst)
+            root = self._open_iso(iso, src, mnts)
+            files = [p for p in root.rglob("*") if p.is_file()]
+            total = sum(p.stat().st_size for p in files)
+            if layout == "exfat":
+                boot_files = [p for p in files if self._on_boot_partition(p.relative_to(root))]
+                boot_mib = max(1024, int(sum(p.stat().st_size for p in boot_files) * 1.1 / 1024 ** 2) + 128)
+                need = (boot_mib + 2) * 1024 ** 2 + total + 64 * 1024 ** 2
             else:
-                self.log("  cannot loop-mount the ISO here, extracting it with 7-Zip instead")
-                if iso_mounted:
-                    self.run(["umount", src], quiet=True)
-                    iso_mounted = False
-                stage = src / "x"
-                self.iso_extract(iso, stage)
-                self.copy_tree_progress(stage, dst)
-            if not (dst / "efi" / "boot" / "bootx64.efi").exists():  # vfat lookups ignore case
-                self.log("  warning: no efi/boot/bootx64.efi on the ISO, the stick may not boot on UEFI")
+                need = total + 64 * 1024 ** 2
+            if size and size < need:
+                raise ForgeError(f"{dev} is too small ({size / 1e9:.1f} GB) for this ISO (needs {need / 1e9:.1f} GB).")
+
+            self.log("Step 1/3  Erasing and partitioning " + dev)
+            for line in self.run(["lsblk", "-lnpo", "NAME,MOUNTPOINT", dev], capture=True, quiet=True).splitlines():
+                parts = line.split(None, 1)
+                if len(parts) == 2 and parts[1].strip():
+                    self.run(["umount", parts[0]], ok=(0, 32))
+            self.run(["wipefs", "-a", dev])
+            if layout == "fat32":
+                self.run(["parted", "-s", dev, "mklabel", "msdos", "mkpart", "primary", "fat32", "1MiB", "100%",
+                          "set", "1", "boot", "on", "set", "1", "lba", "on"])
+            elif size and size >= 2 * 1024 ** 4:  # MBR cannot address past 2 TiB
+                self.run(["parted", "-s", dev, "mklabel", "gpt",
+                          "mkpart", "FORGEBOOT", "fat32", "1MiB", f"{boot_mib + 1}MiB",
+                          "mkpart", "WIN11FORGE", "ntfs", f"{boot_mib + 1}MiB", "100%",
+                          "set", "1", "msftdata", "on", "set", "2", "msftdata", "on"])
+            else:
+                # MBR: type 0x0c (FAT32 LBA) for boot, 0x07 for the exFAT data partition.
+                self.run(["parted", "-s", dev, "mklabel", "msdos",
+                          "mkpart", "primary", "fat32", "1MiB", f"{boot_mib + 1}MiB",
+                          "mkpart", "primary", "ntfs", f"{boot_mib + 1}MiB", "100%",
+                          "set", "1", "boot", "on", "set", "1", "lba", "on"])
+            parts = self._wait_partitions(dev, 1 if layout == "fat32" else 2)
+            self.run(["mkfs.vfat", "-F", "32", "-n", "WIN11FORGE" if layout == "fat32" else "FORGEBOOT", parts[0]])
+            if layout == "exfat":
+                self.run(["mkfs.exfat", "-L", "WIN11FORGE", parts[1]])
+
+            self.log("Step 2/3  Copying Windows installer files")
+            jobs, split, swm = [], [], []
+            boot = Path(tempfile.mkdtemp(prefix="forge-usb-"))
+            self.run(["mount", "-o", "flush", parts[0], boot])
+            mnts.append(boot)
+            if layout == "fat32":
+                for p in files:
+                    rel = p.relative_to(root)
+                    if p.stat().st_size > FAT32_MAX:
+                        if rel.as_posix().lower() not in ("sources/install.wim", "sources/install.esd"):
+                            raise ForgeError(f"{rel} is over 4 GB and cannot go on a FAT32 drive. Pick exFAT instead.")
+                        split.append(p)
+                    else:
+                        jobs.append((p, boot / rel))
+            else:
+                data = Path(tempfile.mkdtemp(prefix="forge-usb-"))
+                self.run(["mount", parts[1], data])
+                mnts.append(data)
+                jobs = [(p, boot / p.relative_to(root)) for p in boot_files]
+                # A Win11Forge ISO stores a big image as install.swm parts (ISO9660 4 GB limit). exFAT does not
+                # need them, so they are joined back into one sources/install.wim.
+                swm = sorted((p for p in files if re.fullmatch(r"sources/install\d*\.swm", p.relative_to(root).as_posix().lower())),
+                             key=lambda p: (len(p.name), p.name.lower()))
+                jobs += [(p, data / p.relative_to(root)) for p in files if p not in swm]
+            self.copy_files_progress(jobs, extra=sum(p.stat().st_size for p in split + swm))
+            if swm:
+                self.log(f"  joining {len(swm)} install.swm parts back into one install.wim")
+                (data / "sources").mkdir(exist_ok=True)
+                self.run(["wimlib-imagex", "join", data / "sources" / "install.wim", *swm], quiet=True)
+            for p in split:
+                self.log(f"  {p.name} is over 4 GB, splitting it into install.swm parts for FAT32")
+                (boot / "sources").mkdir(exist_ok=True)
+                self.run(["wimlib-imagex", "split", p, boot / "sources" / "install.swm", "3800"], quiet=True)
+            if self.progress:
+                self.progress(100)
+            if not (boot / "efi" / "boot" / "bootx64.efi").exists():  # vfat lookups ignore case
+                self.log("  warning: no efi/boot/bootx64.efi on the ISO, the drive may not boot on UEFI")
             self.log("Step 3/3  Flushing data to the drive (do not unplug)")
         finally:
             subprocess.run(["sync"])
-            if iso_mounted:
-                subprocess.run(["umount", str(src)], capture_output=True)
-            if usb_mounted:
-                self.run(["umount", dst])
+            for m in reversed(mnts):
+                subprocess.run(["umount", str(m)], capture_output=True)
+                if m != src:
+                    try:
+                        m.rmdir()
+                    except OSError:
+                        pass
             shutil.rmtree(src, ignore_errors=True)
-            try:
-                dst.rmdir()
-            except OSError:
-                pass
-        self.log(f"USB drive is ready: {dev}. Boot the laptop from it (F12 / F9 / Esc boot menu, UEFI).")
+        if layout == "exfat":
+            free = max(size - need, 0) / 1e9
+            self.log(f"USB drive is ready: {dev}. The big WIN11FORGE (exFAT) partition has about {free:.0f} GB free "
+                     "for your own files, including files over 4 GB.")
+        else:
+            self.log(f"USB drive is ready: {dev}.")
+        self.log("Boot the laptop from it (F12 / F9 / Esc boot menu, UEFI).")
         self.log(f"Done in {(time.time() - t0) / 60:.0f} minutes.")
 
-    def copy_tree_progress(self, src, dst):
-        """Copy a folder to a FAT32 stick with real progress (data is flushed as it goes, so the
+    @staticmethod
+    def _on_boot_partition(rel):
+        """Files the FAT32 boot partition of the exFAT layout gets: everything outside sources/ (bootmgr,
+        efi/, boot/, autounattend.xml...) plus sources/boot.wim. With no install image next to it, the
+        Windows Setup inside boot.wim looks on the other drives and finds sources/install.wim on exFAT."""
+        parts = [x.lower() for x in rel.parts]
+        return parts[0] != "sources" or parts == ["sources", "boot.wim"]
+
+    def _open_iso(self, iso, src, mnts):
+        """Loop-mount the ISO read-only (UDF if needed) or, failing that, extract it with 7-Zip. Returns the tree."""
+        try:
+            self.run(["mount", "-o", "loop,ro", iso, src], quiet=True)
+            mnts.append(src)
+            if not (src / "sources").is_dir():  # the ISO9660 view of a UDF-only image: just a README
+                self.run(["umount", src], quiet=True)
+                mnts.remove(src)
+                self.run(["mount", "-t", "udf", "-o", "loop,ro", iso, src], quiet=True)
+                mnts.append(src)
+        except ForgeError:
+            pass
+        if src in mnts and (src / "sources").is_dir():
+            return src
+        self.log("  cannot loop-mount the ISO here, extracting it with 7-Zip instead")
+        if src in mnts:
+            self.run(["umount", src], quiet=True)
+            mnts.remove(src)
+        stage = src / "x"
+        self.iso_extract(iso, stage)
+        return stage
+
+    def _wait_partitions(self, dev, n):
+        quiet_run(["partprobe", dev])
+        quiet_run(["udevadm", "settle"])
+        for _ in range(20):
+            parts = self.partitions(dev)
+            if len(parts) >= n and all(Path(x).exists() for x in parts[:n]):
+                return parts[:n]
+            time.sleep(0.5)
+        raise ForgeError("The new partitions did not appear after partitioning.")
+
+    def copy_files_progress(self, jobs, extra=0):
+        """Copy (source, destination) file pairs with real progress (data is flushed as it goes, so the
         percentage tracks what is actually on the drive, not what sits in the page cache)."""
-        src, dst = Path(src), Path(dst)
-        files = [p for p in src.rglob("*") if p.is_file()]
-        big = [p for p in files if p.stat().st_size > FAT32_MAX]
-        for p in big:
-            if p.relative_to(src).as_posix().lower() not in ("sources/install.wim", "sources/install.esd"):
-                raise ForgeError(f"{p.relative_to(src)} is over 4 GB and cannot go on a FAT32 drive.")
-        total = sum(p.stat().st_size for p in files) or 1
+        total = (sum(s.stat().st_size for s, _ in jobs) + extra) or 1
         done, last = 0, -1
         chunk = 8 * 1024 * 1024
-        for p in files:
-            rel = p.relative_to(src)
-            if p in big:
-                continue
-            out = dst / rel
+        for s, out in jobs:
             out.parent.mkdir(parents=True, exist_ok=True)
-            with open(p, "rb") as fi, open(out, "wb") as fo:
+            with open(s, "rb") as fi, open(out, "wb") as fo:
                 since_sync = 0
                 while True:
                     b = fi.read(chunk)
@@ -764,13 +832,6 @@ class Engine:
                             self.log(f"  copied {pct}% ({done / 1024 ** 3:.1f} of {total / 1024 ** 3:.1f} GB)")
                 fo.flush()
                 os.fsync(fo.fileno())
-        for p in big:
-            self.log(f"  {p.name} is over 4 GB, splitting it into install.swm parts for FAT32")
-            (dst / "sources").mkdir(exist_ok=True)
-            self.run(["wimlib-imagex", "split", p, dst / "sources" / "install.swm", "3800"], quiet=True)
-            done += p.stat().st_size
-            if self.progress:
-                self.progress(100)
 
 
 def host_defaults():

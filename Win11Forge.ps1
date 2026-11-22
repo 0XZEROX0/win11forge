@@ -7,9 +7,10 @@
         powershell -ExecutionPolicy Bypass -File .\Win11Forge.ps1 -Config .\build.json
     USB installer from a finished ISO (as Administrator):
         powershell -ExecutionPolicy Bypass -File .\Win11Forge.ps1 -ListUsb
-        powershell -ExecutionPolicy Bypass -File .\Win11Forge.ps1 -WriteUsb .\Win11-Forge.iso -Disk 2
+        powershell -ExecutionPolicy Bypass -File .\Win11Forge.ps1 -WriteUsb .\Win11-Forge.iso -Disk 2 [-UsbFormat FAT32]
+        (default exFAT: small FAT32 boot partition + exFAT for the rest; FAT32: one partition, install.wim split)
 #>
-param([string]$Config, [string]$WriteUsb, [int]$Disk = -1, [switch]$ListUsb)
+param([string]$Config, [string]$WriteUsb, [int]$Disk = -1, [switch]$ListUsb, [ValidateSet('exFAT', 'FAT32')][string]$UsbFormat = 'exFAT')
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
@@ -33,7 +34,7 @@ if ($WriteUsb) {
     if (-not $d.Count) { throw "Pass -Disk with one of these USB drives: " + ((@(Get-ForgeUsbDisks) | ForEach-Object { $_.Number }) -join ', ') }
     $ans = Read-Host "Everything on $($d[0].Label) will be erased. Type YES to continue"
     if ($ans -cne 'YES') { 'Cancelled.'; return }
-    Write-ForgeIsoToUsb -IsoPath $WriteUsb -DiskNumber $Disk
+    Write-ForgeIsoToUsb -IsoPath $WriteUsb -DiskNumber $Disk -Layout $UsbFormat
     return
 }
 
@@ -329,6 +330,13 @@ function Show-UsbPicker([string]$Iso) {
       <ComboBox Name="CmbDrive"/>
     </DockPanel>
     <TextBlock Name="TxtHint" Foreground="#B42318" Margin="0,6,0,0" TextWrapping="Wrap"/>
+    <TextBlock Text="Format" FontWeight="SemiBold" Margin="0,10,0,4"/>
+    <RadioButton Name="RadExfat" GroupName="Fmt" IsChecked="True" Margin="0,0,0,4"
+      Content="exFAT (recommended): the rest of the drive stays usable for your own files, including files over 4 GB"/>
+    <RadioButton Name="RadFat32" GroupName="Fmt"
+      Content="FAT32 only: one partition, install.wim split into parts (for very old laptops)"/>
+    <TextBlock TextWrapping="Wrap" Foreground="#5B6472" Margin="0,4,0,0"
+      Text="exFAT puts a small FAT32 boot partition first, so it still boots with Secure Boot on."/>
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
       <Button Name="BtnCancel" Content="Not now" Padding="14,5" IsCancel="True"/>
       <Button Name="BtnWrite" Content="Erase and write" Padding="18,5" Margin="8,0,0,0" FontWeight="SemiBold"
@@ -340,16 +348,17 @@ function Show-UsbPicker([string]$Iso) {
     $dlg = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $px))
     $dlg.Owner = $win
     $c = @{}
-    foreach ($nm in 'TxtIsoName', 'BtnRefresh', 'CmbDrive', 'TxtHint', 'BtnCancel', 'BtnWrite') { $c[$nm] = $dlg.FindName($nm) }
+    foreach ($nm in 'TxtIsoName', 'BtnRefresh', 'CmbDrive', 'TxtHint', 'BtnCancel', 'BtnWrite', 'RadExfat', 'RadFat32') { $c[$nm] = $dlg.FindName($nm) }
     $isoSize = (Get-Item $Iso).Length
-    $need = $isoSize + 64MB
+    # exFAT layout also needs room for the FAT32 boot partition (about 1.2 GB)
+    $needOf = { if ($c.RadExfat.IsChecked) { $isoSize + 1300MB } else { $isoSize + 64MB } }.GetNewClosure()
     $c.TxtIsoName.Text = ('{0}  ({1:N1} GB)' -f (Split-Path $Iso -Leaf), ($isoSize / 1GB))
     $st = @{ Disks = @(); Chosen = $null }
     $refresh = {
         $c.CmbDrive.Items.Clear()
         $st.Disks = @(Get-ForgeUsbDisks)
         foreach ($d in $st.Disks) {
-            $t = $d.Label; if ($d.Size -lt $need) { $t += '   (too small)' }
+            $t = $d.Label; if ($d.Size -lt (& $needOf)) { $t += '   (too small)' }
             [void]$c.CmbDrive.Items.Add($t)
         }
         if ($st.Disks.Count) { $c.CmbDrive.SelectedIndex = 0; $c.TxtHint.Text = '' }
@@ -357,12 +366,13 @@ function Show-UsbPicker([string]$Iso) {
         $c.BtnWrite.IsEnabled = [bool]$st.Disks.Count
     }.GetNewClosure()
     $c.BtnRefresh.Add_Click($refresh)
+    $c.RadExfat.Add_Checked($refresh); $c.RadFat32.Add_Checked($refresh)
     $c.BtnWrite.Add_Click({
         if ($c.CmbDrive.SelectedIndex -lt 0) { return }
         $d = $st.Disks[$c.CmbDrive.SelectedIndex]
-        if ($d.Size -lt $need) { $c.TxtHint.Text = 'That drive is too small for this ISO.'; return }
+        if ($d.Size -lt (& $needOf)) { $c.TxtHint.Text = 'That drive is too small for this ISO.'; return }
         $r = [Windows.MessageBox]::Show($dlg, "Everything on`n`n    $($d.Label)`n`nwill be erased. Continue?", 'Win11Forge', 'YesNo', 'Warning')
-        if ($r -eq 'Yes') { $st.Chosen = $d; $dlg.Close() }
+        if ($r -eq 'Yes') { $st.Chosen = @{ Number = $d.Number; Label = $d.Label; Layout = $(if ($c.RadFat32.IsChecked) { 'FAT32' } else { 'exFAT' }) }; $dlg.Close() }
     }.GetNewClosure())
     & $refresh
     [void]$dlg.ShowDialog()
@@ -379,7 +389,7 @@ function Start-UsbWrite([string]$Iso) {
     $disk = Show-UsbPicker -Iso $Iso
     if (-not $disk) { return }
     Add-Log ''
-    Start-ForgeJob -Kind 'usb' -Arg @{ Iso = $Iso; Disk = $disk.Number }
+    Start-ForgeJob -Kind 'usb' -Arg @{ Iso = $Iso; Disk = $disk.Number; Layout = $disk.Layout }
 }
 
 $ui.BtnUsb.Add_Click({ Start-UsbWrite -Iso $ui.TxtOutIso.Text })
@@ -424,7 +434,7 @@ function Start-ForgeJob([string]$Kind, $Arg) {
         try {
             Import-Module $ModulePath -Force
             Set-ForgeLogger -Logger ({ param($m) $Sync.Queue.Enqueue($m) }.GetNewClosure())
-            if ($Kind -eq 'usb') { Write-ForgeIsoToUsb -IsoPath $Arg.Iso -DiskNumber $Arg.Disk }
+            if ($Kind -eq 'usb') { Write-ForgeIsoToUsb -IsoPath $Arg.Iso -DiskNumber $Arg.Disk -Layout $Arg.Layout }
             else { Invoke-ForgeBuild -Options $Arg }
             $Sync.Ok = $true
         } catch {
